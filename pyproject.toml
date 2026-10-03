@@ -1,0 +1,23 @@
+[project]
+name = "samp-via-opt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Lukas Czipin", email = "lukas.czipin@outlook.de" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "jax[cuda12]; sys_platform == 'linux'",
+    "jax; sys_platform != 'linux'",
+    "equinox",
+    "matplotlib",
+    "pandas",
+]
+
+[project.scripts]
+samp-via-opt = "samp_via_opt:main"
+
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10.0"]
+build-backend = "uv_build"
