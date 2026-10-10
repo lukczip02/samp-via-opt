@@ -13,6 +13,7 @@ dependencies = [
     "equinox",
     "matplotlib",
     "pandas",
+    "numpy",
 ]
 
 [project.scripts]

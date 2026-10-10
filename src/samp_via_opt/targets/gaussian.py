@@ -18,6 +18,8 @@ class GaussianTarget(BaseTarget):
         logdet: Log-determinant of the covariance matrix.
         L: Smoothness parameter (largest eigenvalue of the precision matrix).
         m: Strong convexity parameter (smallest eigenvalue of the precision matrix).
+        B1: Precomputation of B1 for TIPreL to avoid redundancy.
+        constant_hessian: Hessian of the Gaussian does not depend on x, therefore B1 can be precomputed once.
     """
 
     mean: jax.Array
@@ -26,8 +28,10 @@ class GaussianTarget(BaseTarget):
     logdet: jax.Array
     L: float
     m: float
+    B1: jax.Array
+    constant_hessian: bool = True
 
-    def __init__(self, mean: jax.Array, cov: jax.Array):
+    def __init__(self, mean: jax.Array, cov: jax.Array, eps: float = 1e-6):
         self.mean = jnp.asarray(mean)
         self.cov = jnp.asarray(cov)
         self.inv_cov = jnp.linalg.inv(self.cov)
@@ -37,6 +41,8 @@ class GaussianTarget(BaseTarget):
         self.m = float(jnp.min(precision_eigenvals))
 
         _, self.logdet = jnp.linalg.slogdet(self.cov)
+
+        self.B1 = self.cov
 
     @property
     def dim(self) -> int:
@@ -51,5 +57,5 @@ class GaussianTarget(BaseTarget):
             + self.logdet
         )
 
-    # def grad_log_prob(self, x: jax.Array):
-    #     return -self.inv_cov @ (x - self.mean)
+    def grad_log_prob(self, x: jax.Array):
+        return -self.inv_cov @ (x - self.mean)

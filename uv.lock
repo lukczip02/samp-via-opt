@@ -895,6 +895,7 @@ dependencies = [
     { name = "jax" },
     { name = "jax", extra = ["cuda12"], marker = "sys_platform == 'linux'" },
     { name = "matplotlib" },
+    { name = "numpy" },
     { name = "pandas" },
 ]
 
@@ -904,6 +905,7 @@ requires-dist = [
     { name = "jax", marker = "sys_platform != 'linux'" },
     { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux'" },
     { name = "matplotlib" },
+    { name = "numpy" },
     { name = "pandas" },
 ]
 

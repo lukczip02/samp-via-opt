@@ -53,13 +53,28 @@ class BaseSampler(eqx.Module, ABC, Generic[StateType]):
         """
         pass
 
-    # def sample(self, target: BaseTarget, init_state: StateType, key: jax.Array, num_steps: int, save_aux: bool = False) -> tuple[StateType, jax.Array, dict[str, jax.Array]]:
-    #     step_keys = jax.random.split(key, num_steps)
+    def sample(
+        self,
+        target: BaseTarget,
+        init_state: StateType,
+        key: jax.Array,
+        num_steps: int,
+        save_aux: bool = False,
+    ) -> tuple[StateType, jax.Array, dict[str, jax.Array]]:
+        """
+        Runs a sequential chain for num_steps using jax.lax.scan.
 
-    #     def scan_fn(carrier_state: StateType, step_key: jax.Array):
-    #         new_state, aux = self.step(carrier_state, target, step_key)
-    #         out_aux = aux if save_aux else {}
-    #         return new_state, (new_state.x, out_aux)
+        Returns:
+            final_state: State at the final iteration.
+            xs: Array of positions across all iterations, shape (num_steps, d).
+            auxs: Dict of auxiliary outputs collected at each step.
+        """
+        step_keys = jax.random.split(key, num_steps)
 
-    #     final_state, (xs, auxs) = jax.lax.scan(scan_fn, init_state, step_keys)
-    #     return final_state, xs, auxs
+        def scan_fn(carrier_state: StateType, step_key: jax.Array):
+            new_state, aux = self.step(carrier_state, target, step_key)
+            out_aux = aux if save_aux else {}
+            return new_state, (new_state.x, out_aux)
+
+        final_state, (xs, auxs) = jax.lax.scan(scan_fn, init_state, step_keys)
+        return final_state, xs, auxs
