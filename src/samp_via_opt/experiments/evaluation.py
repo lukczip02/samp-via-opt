@@ -265,8 +265,8 @@ def build_ensemble_evaluator(sampler: Any, num_chains: int, eval_steps: np.ndarr
     def eval_fn(step_sizes, x0, key, target):
         keys = jax.random.split(key, step_sizes.shape[0])
         return jax.lax.map(
-            lambda h, k: run_ensemble(
-                sampler, target, x0, h, k, num_chains, eval_steps
+            lambda h_k: run_ensemble(
+                sampler, target, x0, h_k[0], h_k[1], num_chains, eval_steps
             ),
             (step_sizes, keys),
             batch_size=5,

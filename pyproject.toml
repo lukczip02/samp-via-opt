@@ -8,8 +8,9 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "jax[cuda12]; sys_platform == 'linux'",
-    "jax; sys_platform != 'linux'",
+    # "jax[cuda12]; sys_platform == 'linux'",
+    # "jax; sys_platform != 'linux'",
+    "jax",
     "equinox",
     "matplotlib",
     "pandas",
@@ -20,5 +21,5 @@ dependencies = [
 samp-via-opt = "samp_via_opt:main"
 
 [build-system]
-requires = ["uv_build>=0.9.5,<0.10.0"]
+requires = ["uv_build>=0.9.5"]
 build-backend = "uv_build"
