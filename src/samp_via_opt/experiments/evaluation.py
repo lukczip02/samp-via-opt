@@ -363,7 +363,7 @@ def convergence_table(
                 :, -1
             ].tolist(),  # only use final checkpoint
             "final_cov_err_white": metrics["cov_error"][:, -1].tolist(),
-            "diverged": (~jnp.isfinite(metrics["w2_gaussian_W2"][:, -1])).tolist(),
+            "diverged": (~jnp.isfinite(metrics["w2_gaussian"][:, -1])).tolist(),
             "floor_norm": floor / norm,
             "eps": eps,
             "floor_ok": floor / norm < 0.5 * eps,  # is eps resolvable with C chains?
