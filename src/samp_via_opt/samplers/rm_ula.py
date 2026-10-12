@@ -3,6 +3,7 @@ Implementation of Randomized Midpoint Unadjusted Langevin Algorithm (RMULA) samp
 Introduces a randomized midpoint discretization of the Langevin dynamics to improve convergence compared to standard ULA.
 """
 
+from jax.typing import DTypeLike
 import jax
 import jax.numpy as jnp
 from typing import Optional
@@ -17,23 +18,29 @@ class RMULA(BaseSampler[ULAState]):
 
     Attributes:
         step_size: Step size for the Langevin dynamics.
+        dtype: Used floating point precision, either float32 or float64.
     """
 
     step_size: float
+    dtype: DTypeLike = jnp.float32
 
     def init_state(self, x0: jax.Array, key: Optional[jax.Array] = None) -> ULAState:
-        return ULAState(x=jnp.asarray(x0))
+        return ULAState(x=jnp.asarray(x0, dtype=self.dtype))
 
     def step(
         self, state: ULAState, target: BaseTarget, key: jax.Array
     ) -> tuple[ULAState, dict[str, jax.Array]]:
-        h = self.step_size
+        h = jnp.asarray(self.step_size, dtype=state.x.dtype)
 
         noise_key_mid, noise_key_end, midpoint_key = jax.random.split(key, 3)
 
-        midpoint = jax.random.uniform(midpoint_key, shape=())
-        noise_mid = jax.random.normal(noise_key_mid, shape=state.x.shape)
-        noise_end = jax.random.normal(noise_key_end, shape=state.x.shape)
+        midpoint = jax.random.uniform(midpoint_key, shape=(), dtype=state.x.dtype)
+        noise_mid = jax.random.normal(
+            noise_key_mid, shape=state.x.shape, dtype=state.x.dtype
+        )
+        noise_end = jax.random.normal(
+            noise_key_end, shape=state.x.shape, dtype=state.x.dtype
+        )
 
         grad = target.grad_log_prob(state.x)
 

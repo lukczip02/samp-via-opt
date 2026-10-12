@@ -30,9 +30,25 @@ from samp_via_opt.samplers import ULA, RMULA, ULMC, RMULMC
 SamplerFactory = Callable[[GaussianTarget, float | None], Any]
 
 
+def diagonal_gaussian_cov(dim: int, cond_number: float) -> jax.Array:
+    """
+    Create diagonal covariance with eigenvalues log-spaced in [1, kappa] (so L = 1, m = 1/kappa).
+
+    Args:
+        dim: Dimension of the Gaussian.
+        cond_number: Condition number kappa = L / m.
+        key: PRNG key for random number generation.
+
+    Returns:
+        Covariance matrix of shape (dim, dim).
+    """
+    eigenvals = jnp.logspace(0, -jnp.log10(cond_number), num=dim)
+    return jnp.diag(1.0 / eigenvals)
+
+
 def anisotropic_gaussian_cov(dim: int, cond_number: float, key: jax.Array) -> jax.Array:
     """
-    Covariance with eigenvalues log-spaced in [1, kappa] (so L = 1, m = 1/kappa).
+    Create covariance with eigenvalues log-spaced in [1, kappa] (so L = 1, m = 1/kappa).
     Rotate diagonal matrix of specified eigenvalues via QR method.
     Applied rotation doesn't favor any spatial direction (Haar uniform).
 
@@ -61,6 +77,7 @@ def run_grid_search(
     target_eps: float = 0.1,
     target_eps_white: float = 0.2,
     init_sigma: float = 3.0,
+    use_float32: bool = False,
     seed: int = 0,
 ) -> pd.DataFrame:
     """
@@ -77,6 +94,8 @@ def run_grid_search(
         target_eps_white: Convergence threshold for the target in whitened coordinates.
         num_steps: Number of steps to run for each chain.
         init_sigma: Initial standard deviation for the starting point.
+        use_float32: To improve performance, chains can be run in float32 precision.
+                     Numerically critical computations still use float64.
         seed: Random seed for reproducibility.
 
     Returns:
@@ -94,9 +113,11 @@ def run_grid_search(
             )
 
             target = GaussianTarget(
-                mean=jnp.zeros(dim), cov=anisotropic_gaussian_cov(dim, kappa, cov_key)
+                mean=jnp.zeros(dim), cov=diagonal_gaussian_cov(dim, kappa), diag=True
             )
-            target_white = GaussianTarget(mean=jnp.zeros(dim), cov=jnp.eye(dim))
+            target_white = GaussianTarget(
+                mean=jnp.zeros(dim), cov=jnp.eye(dim), diag=True
+            )
 
             x0 = slow_direction_init(target, n_sigma=init_sigma)
 
@@ -122,7 +143,9 @@ def run_grid_search(
             for name, (factory, uses_gamma) in sampler_registry.items():
                 for gamma in gammas if uses_gamma else [None]:
                     sampler = factory(target, gamma)
-                    eval_fn = build_ensemble_evaluator(sampler, num_chains, eval_steps)
+                    eval_fn = build_ensemble_evaluator(
+                        sampler, num_chains, eval_steps, use_float32
+                    )
                     metrics, sec = timed_call(eval_fn, step_sizes, x0, run_key, target)
 
                     if gamma is None:
@@ -150,68 +173,32 @@ def run_grid_search(
     return pd.concat(tables, ignore_index=True)
 
 
-# def best_per_sampler(df: pd.DataFrame, white: bool=False, unit: str="grad_evals"):
-#     """
-#     Best configuration per (dimension, condition_number, sampler).
-#     For samplers that converged: picks the run minimizing parameter `unit`.
-#     For samplers that never converged: falls back to the best non-diverged run minimizing `final_w2_norm`.
-#     Filtering can be based on whitened metrics if desired.
-
-#     Args:
-#         df: DataFrame containing the results of the grid search.
-#         white: Use whitened metrics if set to True.
-#         unit: Metric to minimize for converged runs.
-#               Defaults to steps_to_conv if not set as "grad_evals".
-
-#     Returns:
-#         DataFrame containing the best configuration per sampler.
-#     """
-
-#     sfx = "_white" if white else ""
-#     conv_col = f"converged{sfx}"
-#     cost = f"{'grad_evals' if unit == 'grad_evals' else 'steps'}_to_conv{sfx}"
-#     fallback = "final_w2_white" if white else "final_w2_norm"
-#     keys = ["dimension", "kappa", "sampler"]
-
-#     ok = df[~df["diverged"]]
-
-#     conv = (ok[ok[conv_col]].sort_values(cost)
-#             .drop_duplicates(keys).assign(never_converged=False))
-
-#     fb = ok.sort_values(fallback).drop_duplicates(keys)
-#     fb = fb.merge(conv[keys], on=keys, how="left", indicator=True)
-#     fb = (fb[fb["_merge"] == "left_only"].drop(columns="_merge")
-#           .assign(never_converged=True))
-
-#     best = pd.concat([conv, fb], ignore_index=True)
-
-#     # groups that diverged on every step size
-#     miss = df[keys].drop_duplicates().merge(best[keys], on=keys, how="left", indicator=True)
-#     miss = (miss[miss["_merge"] == "left_only"].drop(columns="_merge")
-#             .assign(never_converged=True))
-#     best = pd.concat([best, miss], ignore_index=True)
-
-#     h_lo, h_hi = df["step_size"].min(), df["step_size"].max()
-#     best["at_boundary"] = (np.isclose(best["step_size"], h_lo)
-#                            | np.isclose(best["step_size"], h_hi))
-#     return best.sort_values(["dimension", "kappa", cost]).reset_index(drop=True)
-
-
 if __name__ == "__main__":
     jax.config.update("jax_enable_x64", True)
 
-    num_steps = 20_000  # fixed budget
+    # fixed budget
+    num_steps = 20_000
+
+    # option to use float32 precision for most of the computations inside of the chains
+    # numerically critical computations are still kept in float64
+    use_float32 = True
+    sampler_dtype = jnp.float32 if use_float32 else jnp.float64
 
     sampler_registry_dim_kappa: dict[str, tuple[SamplerFactory, bool]] = {
         # name: (factory, uses_gamma)
-        "ULA": (lambda t, g: ULA(step_size=1.0), False),
-        "RMULA": (lambda t, g: RMULA(step_size=1.0), False),
-        "ULMC": (lambda t, g: ULMC(step_size=1.0, alpha=g, beta=1.0 / t.L), True),
+        "ULA": (lambda t, g: ULA(step_size=1.0, dtype=sampler_dtype), False),
+        "RMULA": (lambda t, g: RMULA(step_size=1.0, dtype=sampler_dtype), False),
+        "ULMC": (
+            lambda t, g: ULMC(
+                step_size=1.0, alpha=g, beta=1.0 / t.L, dtype=sampler_dtype
+            ),
+            True,
+        ),
         "RMULMC": (lambda t, g: RMULMC(step_size=1.0, u=1.0 / t.L), False),
     }
 
     df_dim_kappa = run_grid_search(
-        dims=[2, 10, 50],
+        dims=[2],
         cond_numbers=[10.0, 100.0, 1000.0, 10_000.0],
         # upper stability limit: h=2/L=2, L=1 by construction
         # to reach accuracy eps: T_ULA ~ kappa*log (1 / eps), T_ULMC ~ sqrt(kappa)*log(1 / eps)
@@ -224,6 +211,7 @@ if __name__ == "__main__":
         eval_steps=make_eval_steps(num_steps),
         target_eps=0.1,
         target_eps_white=0.2,
+        use_float32=use_float32,
         seed=42,
     )
-    df_dim_kappa.to_csv("dimension_conditioning_scaling_results.csv", index=False)
+    df_dim_kappa.to_csv("dimension_conditioning_scaling_results_f64.csv", index=False)

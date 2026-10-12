@@ -131,26 +131,69 @@ def noise_floor(
 
 
 def check_W2_converged(
-    w2n: jax.Array, eps: float, steps: jax.Array
+    w2n: jax.Array,
+    eps: float,
+    steps: jax.Array,
+    floor: float = 0.0,
+    window: int = 5,
 ) -> tuple[jax.Array, jax.Array]:
     """
-    Checks whether the sampler converged to the target,
-    i.e. whether the normalised W2 <= eps at some checkpoint and stays below at all later checkpoints.
+    Checks whether the sampler converged to the target, i.e. whether the (smoothed, floor-corrected)
+    W2 <= eps at some checkpoint and stays below at all later checkpoints.
+
+    Two measures make the criterion robust against Monte Carlo noise:
+    1. The noise floor is subtracted in quadrature: sqrt(max(w2^2 - floor^2, 0)).
+    2. A rolling median over `window` neighbouring checkpoints suppresses isolated peaks
+       (up to window // 2 of them) above eps.
 
     Args:
-        w2n (n_h, n_eval): Normalised W2 distance at n_eval checkpoints across n_h step sizes.
+        w2n (n_h, n_eval): W2 distance at n_eval checkpoints across n_h step sizes.
         eps: Convergence threshold.
         steps: Step numbers at which convergence metrics were evaluated.
+        floor: Monte Carlo noise floor in the same units as w2n (0 disables the correction).
+        window: Odd window length of the rolling median (1 disables smoothing).
 
     Returns:
-        Indicator whether the sampler converged and at which checkpoint.
+        Indicator whether the sampler converged and at which step number.
     """
+    n_eval = w2n.shape[-1]
 
-    below = (w2n <= eps).astype(jnp.int32)
+    # noise-floor correction
+    w2c = jnp.sqrt(jnp.maximum(w2n**2 - floor**2, 0.0))
+
+    # centred rolling median, edges padded by repetition, only apply padding to checkpoint dimension
+    if window > 1:
+        half = window // 2
+        padded = jnp.pad(w2c, [(0, 0)] * (w2c.ndim - 1) + [(half, half)], mode="edge")
+        idx = (
+            jnp.arange(n_eval)[:, None] + jnp.arange(window)[None, :]
+        )  # (n_eval, window)
+        w2c = jnp.median(padded[..., idx], axis=-1)
+
+    below = (w2c <= eps).astype(jnp.int32)
     stays = jnp.flip(jnp.cumprod(jnp.flip(below, -1), -1), -1).astype(bool)
     converged = stays.any(-1)
     steps_to_conv = jnp.where(converged, steps[jnp.argmax(stays, -1)], jnp.inf)
     return converged, steps_to_conv
+
+
+def asymptotic_error(w2n: jax.Array, floor: float, last: int = 10) -> jax.Array:
+    """
+    Late-time error level of each run: the median over the last `last` checkpoints
+    of the floor-corrected W2, sqrt(max(w2^2 - floor^2, 0)).
+    For small step sizes this is still transient, for large step sizes it approximates
+    the discretisation bias.
+
+    Args:
+        w2n (n_h, n_eval): W2 distance at all checkpoints for each step size.
+        floor: Monte Carlo noise floor in the same units as w2n.
+        last: Number of final checkpoints to use.
+
+    Returns:
+        (n_h,) asymptotic error per step size.
+    """
+    w2c = jnp.sqrt(jnp.maximum(w2n**2 - floor**2, 0.0))
+    return jnp.median(w2c[..., -last:], axis=-1)
 
 
 # ----------------------------------------------------------------------------------
@@ -164,6 +207,7 @@ def run_ensemble(
     key: jax.Array,
     num_chains: int,
     eval_steps: np.ndarray,
+    use_float32: bool,
 ) -> dict[str, jax.Array]:
     """
     Run C independent chains of a sampler for a given step size, and evaluate convergence metrics at checkpoints.
@@ -176,6 +220,8 @@ def run_ensemble(
         key: PRNGKey for random number generation.
         num_chains: Number of independent chains to run in parallel.
         eval_steps: Step numbers at which to evaluate convergence metrics.
+        use_float32: To improve performance, chains can be run in float32 precision.
+                     Numerically critical computations still use float64.
 
     Returns:
         Dictionary containing convergence metrics at each checkpoint.
@@ -196,8 +242,16 @@ def run_ensemble(
     init_keys = jax.random.split(key_init, num_chains)
     state = jax.vmap(lambda x, k: sampler.init_state(x, key=k))(x0s, init_keys)
 
+    sampler_target = (
+        jax.tree.map(
+            lambda a: a.astype(jnp.float32) if eqx.is_inexact_array(a) else a, target
+        )
+        if use_float32
+        else target
+    )
+
     # scan over chains for one time step, return only the new state (discard aux info)
-    vstep = jax.vmap(lambda s, k: sampler.step(s, target, k)[0])
+    vstep = eqx.filter_vmap(lambda s, k: sampler.step(s, sampler_target, k)[0])
 
     def block(st, block_params):
         block_length, block_key = block_params
@@ -209,7 +263,9 @@ def run_ensemble(
 
         # scan over all time steps in one evaluation block
         st = jax.lax.fori_loop(0, block_length, map_chains, st)  # dynamic trip count
-        return st, _moments(st.x)
+        return st, _moments(
+            st.x.astype(jnp.float64)
+        )  # cast back to float_64 for metric computations
 
     # scan over evaluation blocks
     block_keys = jax.random.split(key_run, len(eval_steps))
@@ -248,7 +304,9 @@ def run_ensemble(
     }
 
 
-def build_ensemble_evaluator(sampler: Any, num_chains: int, eval_steps: np.ndarray):
+def build_ensemble_evaluator(
+    sampler: Any, num_chains: int, eval_steps: np.ndarray, use_float32: bool
+):
     """
     Returns jitted eval_fn(step_sizes, x0, key, target) -> dict of arrays (n_h, n_eval).
     Step sizes are vmapped, chains are vmapped inside. Independent keys per step size.
@@ -266,7 +324,7 @@ def build_ensemble_evaluator(sampler: Any, num_chains: int, eval_steps: np.ndarr
         keys = jax.random.split(key, step_sizes.shape[0])
         return jax.lax.map(
             lambda h_k: run_ensemble(
-                sampler, target, x0, h_k[0], h_k[1], num_chains, eval_steps
+                sampler, target, x0, h_k[0], h_k[1], num_chains, eval_steps, use_float32
             ),
             (step_sizes, keys),
             batch_size=5,
@@ -310,6 +368,7 @@ def convergence_table(
     floor: float,
     floor_white: float,
     runtime_sec: float | None = None,
+    borderline_tol: float = 0.03,
 ) -> pd.DataFrame:
     """
     Construct a DataFrame summarizing convergence metrics for a given sampler and step sizes.
@@ -335,10 +394,15 @@ def convergence_table(
     w2n_white = metrics["w2_white"]
     steps = jnp.asarray(eval_steps)
 
-    converged, steps_to_conv = check_W2_converged(w2n, eps, steps)
+    converged, steps_to_conv = check_W2_converged(w2n, eps, steps, floor=floor / norm)
     converged_white, steps_to_conv_white = check_W2_converged(
-        w2n_white, eps_white, steps
+        w2n_white, eps_white, steps, floor=floor_white
     )
+
+    asympt = asymptotic_error(w2n, floor / norm)
+    asympt_white = asymptotic_error(w2n_white, floor_white)
+    borderline = jnp.abs(asympt - eps) < borderline_tol
+    borderline_white = jnp.abs(asympt_white - eps_white) < borderline_tol
 
     grads = grads_per_step.get(sampler_name, 1)
     return pd.DataFrame(
@@ -363,7 +427,9 @@ def convergence_table(
                 :, -1
             ].tolist(),  # only use final checkpoint
             "final_cov_err_white": metrics["cov_error"][:, -1].tolist(),
-            "diverged": (~jnp.isfinite(metrics["w2_gaussian"][:, -1])).tolist(),
+            "diverged": (
+                ~jnp.isfinite(w2n[:, -1]) | (w2n[:, -1] > 10.0)
+            ).tolist(),  # high W2 else not captured in float64
             "floor_norm": floor / norm,
             "eps": eps,
             "floor_ok": floor / norm < 0.5 * eps,  # is eps resolvable with C chains?
@@ -372,5 +438,10 @@ def convergence_table(
             "floor_ok_white": floor_white < 0.5 * eps_white,
             "runtime_sec_total": runtime_sec,
             "sec_per_step": runtime_sec / (eval_steps[-1] * len(step_sizes)),
+            "asympt_err_norm": asympt.tolist(),
+            "asympt_err_white": asympt_white.tolist(),
+            "borderline": borderline.tolist(),
+            "borderline_white": borderline_white.tolist(),
+            "borderline_tol": borderline_tol,
         }
     )

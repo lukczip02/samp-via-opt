@@ -4,6 +4,7 @@ Represents the sampling equivalent of gradient descent in optimization. The samp
 """
 
 from typing import Optional
+from jax.typing import DTypeLike
 import jax
 import jax.numpy as jnp
 from samp_via_opt.samplers.base import BaseSampler, SamplerState
@@ -27,19 +28,22 @@ class ULA(BaseSampler[ULAState]):
 
     Attributes:
         step_size: Step size for the Langevin dynamics.
+        dtype: Used floating point precision, either float32 or float64.
     """
 
     step_size: float
+    dtype: DTypeLike = jnp.float32
 
     def init_state(self, x0: jax.Array, key: Optional[jax.Array] = None) -> ULAState:
-        return ULAState(x=jnp.asarray(x0))
+        return ULAState(x=jnp.asarray(x0, dtype=self.dtype))
 
     def step(
         self, state: ULAState, target: BaseTarget, key: jax.Array
     ) -> tuple[ULAState, dict[str, jax.Array]]:
+        h = jnp.asarray(self.step_size, dtype=state.x.dtype)
         grad = target.grad_log_prob(state.x)
-        noise = jax.random.normal(key, shape=state.x.shape)
-        x_new = state.x + self.step_size * grad + jnp.sqrt(2.0 * self.step_size) * noise
+        noise = jax.random.normal(key, shape=state.x.shape, dtype=state.x.dtype)
+        x_new = state.x + h * grad + jnp.sqrt(2.0 * h) * noise
 
         new_state = ULAState(x=x_new)
         aux_info = {"grad_norm": jnp.linalg.norm(grad)}
