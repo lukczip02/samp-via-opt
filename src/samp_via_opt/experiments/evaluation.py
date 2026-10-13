@@ -1,11 +1,10 @@
 """
 Ensemble (parallel-chain) evaluation of samplers on Gaussian targets.
 
-Instead of estimating moments from a time window of ONE chain, we run C independent
-chains from the same start x0 and estimate the law of X_n across chains at every
-checkpoint n. This matches what the theorems bound (W2 of the law of X_n) and removes
-burn-in / autocorrelation from the estimator. Only per-checkpoint moments are stored,
-never the full trajectory.
+We run C independent chains from the same start x0 and estimate the law of X_n across
+chains at every checkpoint n. Matches theoretical bounds (W2 of the law of X_n) and
+removes burn-in from the estimator. Only per-checkpoint moments are stored,
+not the full trajectory.
 """
 
 from typing import Any
@@ -28,21 +27,35 @@ grads_per_step = {"ULA": 1, "ULMC": 1, "RMULA": 2, "RMULMC": 2, "TIPreL": 1}
 
 
 def make_eval_steps(
-    num_steps: int, num_eval_points: int = 100, first: int = 20
-) -> np.ndarray:
+    cond_numbers: list[float],
+    steps_per_kappa: float = 10.0,
+    min_steps: int = 2_000,
+    first: int = 10,
+    rel_spacing: float = 0.05,
+) -> list[np.ndarray]:
     """
-    Log-spaced, strictly increasing checkpoint indices in [first, num_steps].
+    Create one strictly increasing, log-spaced checkpoint array per kappa.
 
     Args:
-        num_steps: Step budget of the sampler chain.
-        num_eval_points: Number of desired checkpoints / evaluation points.
-        first: Step number correspoding to first checkpoint.
+        cond_numbers: List of kappas that each get their own set of evaluation points.
+        steps_per_kappa: Factor that increases the maximimum number of steps for increasing kappa.
+        min_steps: Minimum number of evaluation points.
+        first: First index at which an evaluation point is set.
+        rel_spacing: Relative spacing between evaluation points.
 
     Returns:
-        Log-spaced checkpoint indices.
+        List of log-spaced checkpoints, one per kappa.
     """
-    steps = np.geomspace(first, num_steps, num_eval_points)
-    return np.unique(np.round(steps).astype(np.int64))
+
+    out = []
+    for kappa in cond_numbers:
+        n_max = int(max(min_steps, steps_per_kappa * kappa))
+        # ratio = 1 + rel_spacing = (n_max / first)^(1/(n_pts − 1))
+        # -> n_pts = ln(n_max / first) / ln(1 + rel_spacing) + 1
+        n_pts = int(np.ceil(np.log(n_max / first) / np.log1p(rel_spacing))) + 1
+        steps = np.geomspace(first, n_max, n_pts)
+        out.append(np.unique(np.round(steps).astype(np.int64)))
+    return out
 
 
 def slow_direction_init(target: Any, n_sigma: float = 3.0) -> jax.Array:
@@ -105,8 +118,8 @@ def noise_floor(
     target: Any, key: jax.Array, num_chains: int, num_reps: int = 32
 ) -> jax.Array:
     """
-    Monte-Carlo floor of the estimator: mean Gelbrich distance between C EXACT
-    target samples and the target. Samplers cannot be more accurate than noise floor.
+    Monte-Carlo floor of the estimator: mean W2 distance between C exact target
+    samples and the target. Samplers cannot be more accurate than noise floor.
 
     Args:
         target: Target distribution with .mean and .cov attributes.
@@ -142,8 +155,8 @@ def check_W2_converged(
     W2 <= eps at some checkpoint and stays below at all later checkpoints.
 
     Two measures make the criterion robust against Monte Carlo noise:
-    1. The noise floor is subtracted in quadrature: sqrt(max(w2^2 - floor^2, 0)).
-    2. A rolling median over `window` neighbouring checkpoints suppresses isolated peaks
+    - The noise floor is subtracted in quadrature: sqrt(max(w2^2 - floor^2, 0)).
+    - A rolling median over `window` neighbouring checkpoints suppresses isolated peaks
        (up to window // 2 of them) above eps.
 
     Args:

@@ -50,7 +50,7 @@ def anisotropic_gaussian_cov(dim: int, cond_number: float, key: jax.Array) -> ja
     """
     Create covariance with eigenvalues log-spaced in [1, kappa] (so L = 1, m = 1/kappa).
     Rotate diagonal matrix of specified eigenvalues via QR method.
-    Applied rotation doesn't favor any spatial direction (Haar uniform).
+    Applied rotation doesn't favour any spatial direction (Haar uniform).
 
     Args:
         dim: Dimension of the Gaussian.
@@ -73,7 +73,7 @@ def run_grid_search(
     step_sizes: jax.Array,
     gamma_fn: Callable[[float], list[float]],
     sampler_registry: dict[str, tuple[SamplerFactory, bool]],
-    eval_steps: np.ndarray,
+    eval_steps: list[np.ndarray],
     target_eps: float = 0.1,
     target_eps_white: float = 0.2,
     init_sigma: float = 3.0,
@@ -89,7 +89,7 @@ def run_grid_search(
         step_sizes: Array of step sizes to evaluate.
         gamma_fn: Function that returns a list of gamma values for a given condition number.
         sampler_registry: Dictionary mapping sampler names to (factory, uses_gamma) tuples.
-        eval_steps: Step numbers at which to evaluate convergence metrics.
+        eval_steps: Step numbers at which to evaluate convergence metrics. Unique for each kappa.
         target_eps: Convergence threshold for the target.
         target_eps_white: Convergence threshold for the target in whitened coordinates.
         num_steps: Number of steps to run for each chain.
@@ -105,8 +105,10 @@ def run_grid_search(
     master_key = jax.random.PRNGKey(seed)
     tables = []
 
+    assert len(eval_steps) == len(cond_numbers)
+
     for dim in dims:
-        for kappa in cond_numbers:
+        for kappa, eval_h in zip(cond_numbers, eval_steps):
             print(f"\n--- d = {dim}, kappa = {kappa} ---")
             master_key, cov_key, run_key, floor_key, floor_key_w = jax.random.split(
                 master_key, 5
@@ -144,7 +146,7 @@ def run_grid_search(
                 for gamma in gammas if uses_gamma else [None]:
                     sampler = factory(target, gamma)
                     eval_fn = build_ensemble_evaluator(
-                        sampler, num_chains, eval_steps, use_float32
+                        sampler, num_chains, eval_h, use_float32
                     )
                     metrics, sec = timed_call(eval_fn, step_sizes, x0, run_key, target)
 
@@ -158,7 +160,7 @@ def run_grid_search(
                         step_sizes,
                         name,
                         dim,
-                        eval_steps,
+                        eval_h,
                         target_eps,
                         target_eps_white,
                         norm,
@@ -174,10 +176,8 @@ def run_grid_search(
 
 
 if __name__ == "__main__":
+    # by default use float64 precision
     jax.config.update("jax_enable_x64", True)
-
-    # fixed budget
-    num_steps = 20_000
 
     # option to use float32 precision for most of the computations inside of the chains
     # numerically critical computations are still kept in float64
@@ -197,18 +197,27 @@ if __name__ == "__main__":
         "RMULMC": (lambda t, g: RMULMC(step_size=1.0, u=1.0 / t.L), False),
     }
 
+    cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
+
     df_dim_kappa = run_grid_search(
-        dims=[2],
-        cond_numbers=[10.0, 100.0, 1000.0, 10_000.0],
+        dims=[2, 10],
+        cond_numbers=cond_numbers,
         # upper stability limit: h=2/L=2, L=1 by construction
-        # to reach accuracy eps: T_ULA ~ kappa*log (1 / eps), T_ULMC ~ sqrt(kappa)*log(1 / eps)
-        # for kappa=10_000: T_ULA~23_000, T_ULMC~230 -> h_min_ULA = 23_000 / N !<= 2 -> fix N=20_000
         # allow reasonably small step sizes for small kappas
-        step_sizes=jnp.logspace(-3, jnp.log10(1.95), 25),
-        # optimal gamma (Nesterov): 2*sqrt(m)=2/sqrt(kappa); sqrt(2*L)=sqrt(2) and 2 from sampling theorems
-        gamma_fn=lambda kappa: [float(2.0 / jnp.sqrt(kappa)), float(jnp.sqrt(2)), 2.0],
+        # to reach accuracy eps: T_ULA ~ kappa*log (1 / eps), T_ULMC (in theory) ~ sqrt(kappa)*log(1 / eps)
+        # T_ULA ~ 2.3*kappa -> h_min_ULA = 2.3*kappa / N !<= 2 -> choose at least N ~ 2*kappa
+        step_sizes=jnp.logspace(-3, jnp.log10(1.95), 40),
+        # optimal gamma (Nesterov): 2*sqrt(m)=2/sqrt(kappa), also allow 0.5* and 2.0* that theoretical value
+        # sqrt(2*L)=sqrt(2) and 2 from ULMC sampling theorems
+        gamma_fn=lambda kappa: [
+            float(1.0 / jnp.sqrt(kappa)),
+            float(2.0 / jnp.sqrt(kappa)),
+            float(4.0 / jnp.sqrt(kappa)),
+            float(jnp.sqrt(2)),
+            2.0,
+        ],
         sampler_registry=sampler_registry_dim_kappa,
-        eval_steps=make_eval_steps(num_steps),
+        eval_steps=make_eval_steps(cond_numbers=cond_numbers),
         target_eps=0.1,
         target_eps_white=0.2,
         use_float32=use_float32,
