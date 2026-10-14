@@ -30,7 +30,8 @@ def make_eval_steps(
     cond_numbers: list[float],
     steps_per_kappa: float = 10.0,
     min_steps: int = 2_000,
-    first: int = 10,
+    max_steps: int = 50_000,
+    first: int = 5,
     rel_spacing: float = 0.05,
 ) -> list[np.ndarray]:
     """
@@ -40,6 +41,7 @@ def make_eval_steps(
         cond_numbers: List of kappas that each get their own set of evaluation points.
         steps_per_kappa: Factor that increases the maximimum number of steps for increasing kappa.
         min_steps: Minimum number of evaluation points.
+        max_steps: Maximum number of sampler steps.
         first: First index at which an evaluation point is set.
         rel_spacing: Relative spacing between evaluation points.
 
@@ -49,7 +51,7 @@ def make_eval_steps(
 
     out = []
     for kappa in cond_numbers:
-        n_max = int(max(min_steps, steps_per_kappa * kappa))
+        n_max = int(min(max(min_steps, steps_per_kappa * kappa), max_steps))
         # ratio = 1 + rel_spacing = (n_max / first)^(1/(n_pts − 1))
         # -> n_pts = ln(n_max / first) / ln(1 + rel_spacing) + 1
         n_pts = int(np.ceil(np.log(n_max / first) / np.log1p(rel_spacing))) + 1
@@ -340,7 +342,7 @@ def build_ensemble_evaluator(
                 sampler, target, x0, h_k[0], h_k[1], num_chains, eval_steps, use_float32
             ),
             (step_sizes, keys),
-            batch_size=5,
+            batch_size=20,
         )
 
     return eqx.filter_jit(eval_fn)
@@ -378,6 +380,7 @@ def convergence_table(
     eps: float,
     eps_white: float,
     norm: float,
+    norm_white: float,
     floor: float,
     floor_white: float,
     runtime_sec: float | None = None,
@@ -395,6 +398,7 @@ def convergence_table(
         eps: Convergence threshold for the target.
         eps_white: Convergence threshold for the target in whitened coordinates.
         norm: Normalization factor for W2 distance.
+        norm_white: Normalization factor for whitened W2 distance.
         floor: Monte Carlo noise floor for the estimator.
         floor_white: Whitened noise floor (slightly larger than unwhitened floor).
         runtime_sec: Optional runtime in seconds for the evaluation.
@@ -404,16 +408,16 @@ def convergence_table(
     """
 
     w2n = metrics["w2_gaussian"] / norm  # (n_h, n_eval)
-    w2n_white = metrics["w2_white"]
+    w2n_white = metrics["w2_white"] / norm_white
     steps = jnp.asarray(eval_steps)
 
     converged, steps_to_conv = check_W2_converged(w2n, eps, steps, floor=floor / norm)
     converged_white, steps_to_conv_white = check_W2_converged(
-        w2n_white, eps_white, steps, floor=floor_white
+        w2n_white, eps_white, steps, floor=floor_white / norm_white
     )
 
     asympt = asymptotic_error(w2n, floor / norm)
-    asympt_white = asymptotic_error(w2n_white, floor_white)
+    asympt_white = asymptotic_error(w2n_white, floor_white / norm_white)
     borderline = jnp.abs(asympt - eps) < borderline_tol
     borderline_white = jnp.abs(asympt_white - eps_white) < borderline_tol
 
@@ -446,9 +450,9 @@ def convergence_table(
             "floor_norm": floor / norm,
             "eps": eps,
             "floor_ok": floor / norm < 0.5 * eps,  # is eps resolvable with C chains?
-            "floor_white": floor_white,
+            "floor_white": floor_white / norm_white,
             "eps_white": eps_white,
-            "floor_ok_white": floor_white < 0.5 * eps_white,
+            "floor_ok_white": floor_white / norm_white < 0.5 * eps_white,
             "runtime_sec_total": runtime_sec,
             "sec_per_step": runtime_sec / (eval_steps[-1] * len(step_sizes)),
             "asympt_err_norm": asympt.tolist(),
@@ -456,5 +460,6 @@ def convergence_table(
             "borderline": borderline.tolist(),
             "borderline_white": borderline_white.tolist(),
             "borderline_tol": borderline_tol,
+            "max_steps": eval_steps[-1].tolist(),
         }
     )

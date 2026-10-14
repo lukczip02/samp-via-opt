@@ -67,6 +67,28 @@ def anisotropic_gaussian_cov(dim: int, cond_number: float, key: jax.Array) -> ja
     return Q @ jnp.diag(1.0 / eigenvals) @ Q.T
 
 
+def clustered_bimodal_gaussian_cov(dim: int, cond_number: float) -> jax.Array:
+    """
+    Create covariance with eigenvalues in {1, kappa} (so L = 1, m = 1/kappa).
+    Eigenvalues are equally distributed at two modes: l_min = 1 and l_max = kappa.
+
+    Args:
+        dim: Dimension of the Gaussian.
+        cond_number: Condition number kappa = L / m.
+
+    Returns:
+        Covariance matrix of shape (dim, dim).
+    """
+    n = dim // 2
+
+    # ensure at least one dimension is at each extreme if dim >= 2
+    n = max(1, min(n, dim - 1)) if dim > 1 else 1
+
+    eigenvals = jnp.concatenate([cond_number * jnp.ones(n), jnp.ones(dim - n)])
+
+    return jnp.diag(eigenvals)
+
+
 def run_grid_search(
     dims: list[int],
     cond_numbers: list[float],
@@ -115,7 +137,9 @@ def run_grid_search(
             )
 
             target = GaussianTarget(
-                mean=jnp.zeros(dim), cov=diagonal_gaussian_cov(dim, kappa), diag=True
+                mean=jnp.zeros(dim),
+                cov=clustered_bimodal_gaussian_cov(dim, kappa),
+                diag=True,
             )
             target_white = GaussianTarget(
                 mean=jnp.zeros(dim), cov=jnp.eye(dim), diag=True
@@ -125,11 +149,14 @@ def run_grid_search(
 
             # scale number of chains with dimension to keep MC noise roughly constant
             # noise^2 = E[W2^2] ~ E[|mu|_2^2] + 1/4 E[|Σ_hat - I|_F^2] ~ (d^2 + 5*d)/(4*C)
-            floor_target = 0.3 * target_eps_white  # to be safe, actual target: 0.5*
-            num_chains = int(np.ceil((dim**2 + 5 * dim) / (4 * floor_target**2)))
+            floor_target = 0.35 * target_eps_white  # to be safe, actual target: 0.5*
+            # num_chains = int(np.ceil((dim**2 + 5 * dim) / (4 * floor_target**2)))
+            num_chains = int(np.ceil((dim + 5) / (4 * floor_target**2)))
+            print(f"Number of chains: {num_chains}")
 
-            # normalisation: 1/sqrt(m)
-            norm = float(1.0 / jnp.sqrt(target.m))
+            # normalisation: sqrt(d/m)
+            norm = float(jnp.sqrt(dim / target.m))
+            norm_white = float(jnp.sqrt(dim))
             floor = float(noise_floor(target, floor_key, num_chains))
             print(
                 f"MC noise floor (normalised): {floor / norm:.4f}  vs eps = {target_eps}"
@@ -137,13 +164,13 @@ def run_grid_search(
 
             floor_white = float(noise_floor(target_white, floor_key_w, num_chains))
             print(
-                f"whitened floor: {floor_white:.4f}  vs eps_white = {target_eps_white}"
+                f"whitened floor: {floor_white / norm_white:.4f}  vs eps_white = {target_eps_white}"
             )
 
             gammas = gamma_fn(kappa)
 
             for name, (factory, uses_gamma) in sampler_registry.items():
-                for gamma in gammas if uses_gamma else [None]:
+                for gamma in gammas if uses_gamma else [None] * len(gammas):
                     sampler = factory(target, gamma)
                     eval_fn = build_ensemble_evaluator(
                         sampler, num_chains, eval_h, use_float32
@@ -164,6 +191,7 @@ def run_grid_search(
                         target_eps,
                         target_eps_white,
                         norm,
+                        norm_white,
                         floor,
                         floor_white,
                         runtime_sec=sec,
@@ -181,7 +209,7 @@ if __name__ == "__main__":
 
     # option to use float32 precision for most of the computations inside of the chains
     # numerically critical computations are still kept in float64
-    use_float32 = True
+    use_float32 = False
     sampler_dtype = jnp.float32 if use_float32 else jnp.float64
 
     sampler_registry_dim_kappa: dict[str, tuple[SamplerFactory, bool]] = {
@@ -200,7 +228,7 @@ if __name__ == "__main__":
     cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
 
     df_dim_kappa = run_grid_search(
-        dims=[2, 10],
+        dims=[2, 10, 50],
         cond_numbers=cond_numbers,
         # upper stability limit: h=2/L=2, L=1 by construction
         # allow reasonably small step sizes for small kappas
@@ -223,4 +251,6 @@ if __name__ == "__main__":
         use_float32=use_float32,
         seed=42,
     )
-    df_dim_kappa.to_csv("dimension_conditioning_scaling_results_f64.csv", index=False)
+    df_dim_kappa.to_csv(
+        "dimension_conditioning_scaling_results_d2__d10_e01_f64.csv", index=False
+    )

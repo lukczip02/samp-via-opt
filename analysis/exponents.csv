@@ -1,0 +1,4 @@
+sampler,dimension,alpha,se,n_points,proposal,kind
+ULA,2,1.0110800725648632,0.02853226598693038,5,1.0,kappa_exponent
+ULMC,2,0.9863089308956581,0.021069595102810857,5,0.5,kappa_exponent
+ULA/ULMC,2,0.024771141669205854,0.029555657961087223,5,0.5,speedup_exponent

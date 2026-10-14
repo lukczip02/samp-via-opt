@@ -1,5 +1,5 @@
 """
-Implementation of Unadjusted Langevin Monte Carlo (ULMC) sampler using a simple first-order discretization.
+Implementation of Underdamped Langevin Monte Carlo (ULMC) sampler using a simple first-order discretization.
 ULMC is the sampling equivalent of Momentum based optimization methods, such as Nesterov's accelerated gradient descent.
 The algorithm follows Habring et al. (2025) https://arxiv.org/abs/2507.12432.
 """
