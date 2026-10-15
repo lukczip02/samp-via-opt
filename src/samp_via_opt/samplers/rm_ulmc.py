@@ -1,6 +1,7 @@
 """
 Implementation of Randomized Midpoint Unadjusted Langevin Monte Carlo (RM-ULMC) sampler.
 The RM-ULMC sampler follows Shen and Lee (2019) https://proceedings.neurips.cc/paper_files/paper/2019/file/eb86d510361fc23b59f18c1bc9802cc6-Paper.pdf.
+Additionally we add a friction parameter gamma to match ULMC.
 """
 
 import jax
@@ -16,11 +17,26 @@ class RMULMC(BaseSampler[ULMCState]):
 
     Attributes:
         step_size: Step size for the Langevin dynamics.
+        gamma: Friction coefficient for the velocity update.
+               Not in original paper.
         u: Temperature parameter controlling the noise level.
     """
 
     step_size: float
+    gamma: float | None = 2.0  # 2.0 = Shen & Lee
     u: float = 1.0
+
+    @property
+    def _h(self):  # in converted time units
+        return (
+            0.5 * self.gamma * self.step_size
+            if self.gamma is not None
+            else self.step_size
+        )
+
+    @property
+    def _u(self):  # in converted time units
+        return 4.0 * self.u / self.gamma**2 if self.gamma is not None else self.u
 
     def init_state(self, x0: jax.Array, key: jax.Array | None = None) -> ULMCState:
         x0 = jnp.asarray(x0)
@@ -28,7 +44,7 @@ class RMULMC(BaseSampler[ULMCState]):
             v0 = jnp.zeros_like(x0)  # deterministic fallback
         else:
             # Sample from stationary velocity distribution N(0, u * I)
-            v0 = jnp.sqrt(self.u) * jax.random.normal(key, shape=x0.shape)
+            v0 = jnp.sqrt(self._u) * jax.random.normal(key, shape=x0.shape)
         return ULMCState(x=x0, v=v0)
 
     def _matrix_sqrt_2x2(self, a: jax.Array, b: jax.Array, c: jax.Array) -> jax.Array:
@@ -55,8 +71,8 @@ class RMULMC(BaseSampler[ULMCState]):
         self, state: ULMCState, target: BaseTarget, key: jax.Array
     ) -> tuple[ULMCState, dict[str, jax.Array]]:
         d = state.x.shape[0]
-        h = self.step_size
-        u = self.u
+        h = self._h
+        u = self._u
 
         midpoint_key, noise1_key, noise2_key = jax.random.split(key, 3)
 

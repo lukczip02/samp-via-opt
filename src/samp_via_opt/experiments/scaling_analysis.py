@@ -1,22 +1,25 @@
 """
-Post-processing of the d / kappa scaling experiment (ULA vs ULMC).
+Post-processing of the d / kappa scaling experiment (ULA vs ULMC vs RMULMC).
 
 Question
     How many gradient evaluations T are needed to reach W2 <= eps, and how does T grow with
-    kappa and d?  Proposal: ULA ~ kappa, ULMC ~ sqrt(kappa) (and d vs sqrt(d)).
+    kappa and d?  Reference (proposal): ULA ~ kappa, momentum samplers ~ sqrt(kappa).
+    The reference exponents of every sampler live in one place: the SAMPLERS table below.
 
 Definitions
     - convergence:  floor-corrected, median-smoothed W2 is <= eps from step T onwards until the
                     end of the budget (see check_W2_converged in evaluation.py).
                     Primary criterion: whitened W2 (eps_white). Robustness: normalised Euclidean W2.
-    - T(sampler, d, kappa) = min over step size h (and gamma for ULMC) of the cost until convergence.
-                    Cost = gradient evaluations (primary) or wall-clock seconds (robustness).
-    - censored:     no configuration converged within the budget n_max(kappa) = max(2000, 10*kappa).
+    - T(sampler, d, kappa) = min over step size h (and gamma, if the sampler has one) of the cost
+                    until convergence. Cost = gradient evaluations (primary; RMULMC counts 2 per step,
+                    see `grads_per_step` in the csv) or wall-clock seconds (robustness).
+    - censored:     no configuration converged within the budget n_max(kappa)
+                    (= min(max(2000, 10*kappa), 50000) with the default make_eval_steps; read from the csv).
                     Such cells are drawn as hollow triangles at the budget and excluded from all fits.
 
 Outputs (in --out)
-    fig1_T_vs_kappa.png     top: T vs kappa, bottom: local slope d*log(T) / d*log(kappa), one column per d
-    fig2_speedup.png        T_ULA / T_ULMC vs kappa, reference sqrt(kappa)
+    fig1_T_vs_kappa.png     top: T vs kappa, bottom: local slope d log T / d log kappa, one column per d
+    fig2_speedup.png        T_ULA / T_sampler vs kappa for every other sampler, dashed = reference slope
     fig3_T_vs_dim.png       T(d)/T(d_min) vs d for several kappa (only if >= 2 dimensions)
     table_T.csv             T per (kappa) x (sampler, d)
     exponents.csv           kappa-exponents, speed-up exponents, d-exponents (one row per fit)
@@ -25,13 +28,22 @@ Outputs (in --out)
     robustness.csv          kappa-exponents for other criteria / cost definitions
     diagnostics/            step size & gamma of the optimum, U-shape of final error over h
 
+How to read fig1
+    Points on a straight line (log-log) = power law, its slope alpha is in the legend.
+    The lower row shows the same data as local slopes: a plateau = clean power law, and
+    that is where the fit region (kappa >= --kappa-min) should start.
+
 Usage
     python scaling_analysis.py dimension_conditioning_scaling_results.csv --out analysis
+    python scaling_analysis.py results.csv --usetex      # real LaTeX (needs latex + dvipng installed)
+
+Adding a sampler (e.g. RMULA): add one entry to SAMPLERS, nothing else has to change.
 """
 
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 from pathlib import Path
 
 import matplotlib
@@ -41,16 +53,38 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-SAMPLERS = ("ULA", "ULMC")
-COLORS = {"ULA": "tab:blue", "ULMC": "tab:red"}
-# exponents predicted by the proposal: T ~ kappa^a * d^b
-PROPOSAL = {"ULA": {"kappa": 1.0, "dim": 1.0}, "ULMC": {"kappa": 0.5, "dim": 0.5}}
+# ---------------------------------------------------------------------------------
+# configuration: everything sampler-specific is in this one table
+# ---------------------------------------------------------------------------------
+BASELINE = "ULA"  # speed-ups are measured relative to this sampler
+
+# kappa_ref / dim_ref: exponents a, b of the reference law T ~ kappa^a * d^b (dashed lines in the plots).
+# NOTE: the RMULMC values are a hypothesis (same acceleration as ULMC in kappa, d^(1/3) as in the
+# Shen & Lee analysis). Change them here if you want to compare against a different claim.
+SAMPLERS: dict[str, dict] = {
+    "ULA": dict(
+        color="tab:blue", marker="o", kappa_ref=1.0, dim_ref=1.0, uses_gamma=False
+    ),
+    "ULMC": dict(
+        color="tab:red", marker="s", kappa_ref=0.5, dim_ref=0.5, uses_gamma=True
+    ),
+    "RMULMC": dict(
+        color="tab:green", marker="^", kappa_ref=0.5, dim_ref=1 / 3, uses_gamma=False
+    ),
+}
+
 KEY = ["sampler", "dimension", "kappa"]
-FIRST_CHECKPOINT = 10  # make_eval_steps(first=...): converged here => left-censored
 NEAR_OPT = 1.2  # "near optimal" = within 20 % of the best T
 
-# gamma values in the experiment: c/sqrt(kappa) for c in (1, 2, 4), plus the constants sqrt(2) and 2
-GAMMA_ORDER = ["1/√κ", "2/√κ", "4/√κ", "√2", "2"]
+# gamma values in the experiment: c/sqrt(kappa) for c in (1, 2, 4), plus the constants sqrt(2) and 2.
+# key (used in csv files) -> LaTeX label (used in plots)
+GAMMA_RULES = {
+    "1/sqrt(k)": r"$1/\sqrt{\kappa}$",
+    "2/sqrt(k)": r"$2/\sqrt{\kappa}$",
+    "4/sqrt(k)": r"$4/\sqrt{\kappa}$",
+    "sqrt(2)": r"$\sqrt{2}$",
+    "2": r"$2$",
+}
 
 CRITERIA = {
     "white": dict(
@@ -59,7 +93,7 @@ CRITERIA = {
         eps="eps_white",
         floor_ok="floor_ok_white",
         borderline="borderline_white",
-        label="whitened W2",
+        label=r"whitened $W_2$",
     ),
     "euclid": dict(
         sfx="",
@@ -67,33 +101,78 @@ CRITERIA = {
         eps="eps",
         floor_ok="floor_ok",
         borderline="borderline",
-        label="normalised Euclidean W2",
+        label=r"normalised Euclidean $W_2$",
     ),
 }
+
+
+# ---------------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------------
+def set_style(usetex: bool) -> None:
+    """
+    LaTeX look for all figures. Default: matplotlib's built-in math renderer with Computer Modern
+    (no LaTeX installation needed, looks like LaTeX). usetex=True: the real thing.
+    """
+    plt.rcParams.update(
+        {
+            "text.usetex": usetex,
+            "font.family": "serif",
+            "font.serif": ["Computer Modern Roman"]
+            if usetex
+            else ["cmr10", "DejaVu Serif"],
+            "mathtext.fontset": "cm",
+            "axes.formatter.use_mathtext": True,
+            "axes.unicode_minus": False,  # cmr10 has no unicode minus
+            "text.latex.preamble": r"\usepackage{amsmath}\usepackage{amssymb}",
+        }
+    )
+
+
+def present(df: pd.DataFrame) -> list[str]:
+    """Samplers that occur in df, in the order of the SAMPLERS table."""
+    have = set(df["sampler"])
+    return [s for s in SAMPLERS if s in have]
+
+
+def exp_str(p: float) -> str:
+    """0.5 -> '1/2', 1/3 -> '1/3', 1.0 -> '1' (for labels like $d^{1/3}$)."""
+    f = Fraction(p).limit_denominator(6)
+    return str(f.numerator) if f.denominator == 1 else f"{f.numerator}/{f.denominator}"
+
+
+def save(fig, path, title: str | None = None) -> None:
+    if title:
+        fig.suptitle(title, fontsize=10)
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
+    else:
+        fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------------
 # 0. load: one unified table, independent of the criterion / cost that is analysed
 # ---------------------------------------------------------------------------------
 def gamma_label(gamma: float, kappa: float) -> str:
-    """Name of the gamma rule (the raw value changes with kappa for the c/sqrt(kappa) rules)."""
+    """Key of the gamma rule (the raw value changes with kappa for the c/sqrt(kappa) rules)."""
     if pd.isna(gamma):
-        return "-"
+        return "-"  # samplers without gamma (ULA, RMULMC)
     if np.isclose(gamma, np.sqrt(2), rtol=1e-4):
-        return "√2"
+        return "sqrt(2)"
     if np.isclose(gamma, 2.0, rtol=1e-4):
         return "2"
     for c in (1, 2, 4):
         if np.isclose(gamma * np.sqrt(kappa), c, rtol=1e-4):
-            return f"{c}/√κ"
+            return f"{c}/sqrt(k)"
     return f"{gamma:.3g}"
 
 
 def add_max_steps(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Budget n_max per cell. The budget now depends on kappa (make_eval_steps), so it can no longer be a
-    global constant. If the CSV has no `max_steps` column, recover it from the stored timing:
-    sec_per_step = runtime_sec_total / (n_max * n_step_sizes).
+    Budget n_max per cell. The budget depends on kappa (make_eval_steps), so it is not a global
+    constant. Newer csv files have a `max_steps` column. For older ones recover it from the stored
+    timing: sec_per_step = runtime_sec_total / (n_max * n_step_sizes).
     """
     if "max_steps" in df:
         return df
@@ -106,9 +185,9 @@ def add_max_steps(df: pd.DataFrame) -> pd.DataFrame:
 def prepare(raw: pd.DataFrame, criterion: str, cost: str) -> pd.DataFrame:
     """Select samplers, pick the criterion, and define the cost T (inf = did not converge)."""
     c = CRITERIA[criterion]
-    df = raw[raw["sampler"].isin(SAMPLERS)].copy()
+    df = raw[raw["sampler"].isin(list(SAMPLERS))].copy()
     if df.empty:
-        raise SystemExit(f"no rows for samplers {SAMPLERS} in the csv")
+        raise SystemExit(f"none of the samplers {list(SAMPLERS)} found in the csv")
     df["gamma_label"] = [gamma_label(g, k) for g, k in zip(df["gamma"], df["kappa"])]
     df = add_max_steps(df)
 
@@ -128,13 +207,14 @@ def prepare(raw: pd.DataFrame, criterion: str, cost: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------------
 # 1. best configuration per cell + quality flags
 # ---------------------------------------------------------------------------------
-def best_configs(df: pd.DataFrame) -> pd.DataFrame:
+def best_configs(df: pd.DataFrame, first_checkpoint: int) -> pd.DataFrame:
     """
     T* = min over (h, gamma) per (sampler, d, kappa).
     Cells where nothing converged keep the run with the smallest final error (for diagnostics only).
 
-    Note: ULMC has 5 gamma values and ULA has none, so ULMC gets more 'tries' at the minimum of a noisy
-    quantity. n_near_opt (how many (h, gamma) are within 20 % of T*) tells how flat the optimum is.
+    Note: ULMC has 5 gamma values, ULA and RMULMC have none, so ULMC gets more 'tries' at the minimum
+    of a noisy quantity. n_near_opt (how many (h, gamma) are within 20 % of T*) tells how flat the
+    optimum is.
     """
     best = (
         df.sort_values(["T", "final_err"])
@@ -157,7 +237,8 @@ def best_configs(df: pd.DataFrame) -> pd.DataFrame:
     best["h_at_edge"] = np.isclose(best["step_size"], h_lo) | np.isclose(
         best["step_size"], h_hi
     )
-    best["left_censored"] = ~best["censored"] & (best["steps_conv"] <= FIRST_CHECKPOINT)
+    # converged already at the first checkpoint -> true T may be smaller (left-censored)
+    best["left_censored"] = ~best["censored"] & (best["steps_conv"] <= first_checkpoint)
     return best
 
 
@@ -173,6 +254,7 @@ def checks(df: pd.DataFrame, best: pd.DataFrame) -> pd.DataFrame:
     per_run = df.groupby("sampler").agg(
         diverged_share=("diverged", "mean"),
         floor_ok_everywhere=("floor_ok_used", "all"),
+        median_sec_per_step=("sec_per_step", "median"),
     )
     return per_cell.join(per_run)
 
@@ -200,15 +282,9 @@ def kappa_exponents(best: pd.DataFrame, kappa_min: float) -> pd.DataFrame:
         g = g[g["kappa"] >= kappa_min]
         a, se = ols_slope(np.log(g["kappa"].to_numpy()), np.log(g["T"].to_numpy()))
         rows.append(
-            dict(
-                sampler=s,
-                dimension=d,
-                alpha=a,
-                se=se,
-                n_points=len(g),
-                proposal=PROPOSAL[s]["kappa"],
-            )
-        )
+            dict(sampler=s, dimension=d, alpha=a, se=se, n_points=len(g),
+                 proposal=SAMPLERS[s]["kappa_ref"])
+        )  # fmt: skip
     return pd.DataFrame(
         rows, columns=["sampler", "dimension", "alpha", "se", "n_points", "proposal"]
     )
@@ -234,49 +310,48 @@ def local_slopes(best: pd.DataFrame) -> pd.DataFrame:
 
 def speedup_table(best: pd.DataFrame) -> pd.DataFrame:
     """
-    T_ULA / T_ULMC per (d, kappa). If ULA is censored but ULMC converged, the ratio is only a lower
-    bound (budget_ULA / T_ULMC) and flagged. If ULMC is censored the cell is dropped.
+    T_BASELINE / T_sampler per (sampler, d, kappa) for every sampler other than the baseline.
+    If the baseline is censored but the sampler converged, the ratio is only a lower bound
+    (budget_baseline / T_sampler) and flagged. If the sampler is censored the cell is dropped.
     """
-    cols = [
-        "dimension",
-        "kappa",
-        "T_ULA",
-        "T_ULMC",
-        "budget_ULA",
-        "speedup",
-        "is_lower_bound",
-    ]
-    if not set(SAMPLERS) <= set(best["sampler"]):
+    cols = ["sampler", "dimension", "kappa", "T_base", "T_sampler", "budget_base",
+            "speedup", "is_lower_bound"]  # fmt: skip
+    if BASELINE not in set(best["sampler"]):
         return pd.DataFrame(columns=cols)
-    w = best.pivot_table(
-        index=["dimension", "kappa"],
-        columns="sampler",
-        values=["T", "budget"],
-        aggfunc="first",
+
+    base = best[best["sampler"] == BASELINE][
+        ["dimension", "kappa", "T", "budget"]
+    ].rename(columns={"T": "T_base", "budget": "budget_base"})
+    other = best[best["sampler"] != BASELINE][
+        ["sampler", "dimension", "kappa", "T"]
+    ].rename(columns={"T": "T_sampler"})
+    sp = other.merge(base, on=["dimension", "kappa"])
+
+    base_ok, s_ok = np.isfinite(sp["T_base"]), np.isfinite(sp["T_sampler"])
+    sp["is_lower_bound"] = ~base_ok & s_ok
+    sp["speedup"] = np.where(base_ok & s_ok, sp["T_base"] / sp["T_sampler"], np.nan)
+    lb = sp["is_lower_bound"]
+    sp.loc[lb, "speedup"] = (sp["budget_base"] / sp["T_sampler"])[lb]
+    return (
+        sp[cols].sort_values(["sampler", "dimension", "kappa"]).reset_index(drop=True)
     )
-    t_ula, t_ulmc = w[("T", "ULA")], w[("T", "ULMC")]
-    sp = pd.DataFrame(
-        {"T_ULA": t_ula, "T_ULMC": t_ulmc, "budget_ULA": w[("budget", "ULA")]}
-    )
-    both = np.isfinite(t_ula) & np.isfinite(t_ulmc)
-    sp["is_lower_bound"] = ~np.isfinite(t_ula) & np.isfinite(t_ulmc)
-    sp["speedup"] = np.where(both, t_ula / t_ulmc, np.nan)
-    sp.loc[sp["is_lower_bound"], "speedup"] = (sp["budget_ULA"] / sp["T_ULMC"])[
-        sp["is_lower_bound"]
-    ]
-    return sp.reset_index()[cols]
 
 
 def speedup_exponents(sp: pd.DataFrame, kappa_min: float) -> pd.DataFrame:
+    """alpha in speedup ~ kappa^alpha; the reference is kappa_ref(baseline) - kappa_ref(sampler)."""
     rows = []
-    for d, g in sp.groupby("dimension"):
+    for (s, d), g in sp.groupby(["sampler", "dimension"]):
         g = g[(g["kappa"] >= kappa_min) & ~g["is_lower_bound"] & g["speedup"].notna()]
         a, se = ols_slope(
             np.log(g["kappa"].to_numpy()), np.log(g["speedup"].to_numpy())
         )
-        rows.append(dict(dimension=d, alpha=a, se=se, n_points=len(g), proposal=0.5))
+        ref = SAMPLERS[BASELINE]["kappa_ref"] - SAMPLERS[s]["kappa_ref"]
+        rows.append(
+            dict(sampler=f"{BASELINE}/{s}", dimension=d, alpha=a, se=se, n_points=len(g),
+                 proposal=ref)
+        )  # fmt: skip
     return pd.DataFrame(
-        rows, columns=["dimension", "alpha", "se", "n_points", "proposal"]
+        rows, columns=["sampler", "dimension", "alpha", "se", "n_points", "proposal"]
     )
 
 
@@ -294,15 +369,9 @@ def dim_exponents(best: pd.DataFrame, kappa_min: float) -> pd.DataFrame:
             np.log(gk["dimension"].to_numpy()), np.log(gk["T"].to_numpy())
         )
         rows.append(
-            dict(
-                sampler=s,
-                kappa=k,
-                beta=b,
-                se=se,
-                n_points=len(gk),
-                proposal=PROPOSAL[s]["dim"],
-            )
-        )
+            dict(sampler=s, kappa=k, beta=b, se=se, n_points=len(gk),
+                 proposal=SAMPLERS[s]["dim_ref"])
+        )  # fmt: skip
     return pd.DataFrame(
         rows, columns=["sampler", "kappa", "beta", "se", "n_points", "proposal"]
     )
@@ -311,10 +380,11 @@ def dim_exponents(best: pd.DataFrame, kappa_min: float) -> pd.DataFrame:
 # ---------------------------------------------------------------------------------
 # 3. main figures
 # ---------------------------------------------------------------------------------
-def _legend_label(sampler: str, a: float, se: float) -> str:
+def _fit_label(sampler: str, a: float, se: float) -> str:
     if not np.isfinite(a):
         return sampler
-    return f"{sampler}  α={a:.2f}" + (f"±{se:.2f}" if np.isfinite(se) else "")
+    err = rf"\pm{se:.2f}" if np.isfinite(se) else ""
+    return rf"{sampler}: $\alpha={a:.2f}{err}$"
 
 
 def fig_T_vs_kappa(best, kexp, ls, kappa_min, ylabel, eps_label, path):
@@ -331,97 +401,89 @@ def fig_T_vs_kappa(best, kexp, ls, kappa_min, ylabel, eps_label, path):
     k_lo = best["kappa"].min()
     for j, d in enumerate(dims):
         ax, ax2 = axes[0, j], axes[1, j]
-        for s in SAMPLERS:
+        for s in present(best):
+            cfg = SAMPLERS[s]
             g = best[(best["sampler"] == s) & (best["dimension"] == d)].sort_values(
                 "kappa"
             )
-            if g.empty:
-                continue
             ok = ~g["censored"]
             a, se = fit.get((s, d), (np.nan, np.nan))
-            ax.plot(
-                g.loc[ok, "kappa"],
-                g.loc[ok, "T"],
-                "o-",
-                color=COLORS[s],
-                label=_legend_label(s, a, se),
-            )
+            # converged cells: line with markers; censored cells: hollow triangle at the budget
+            ax.plot(g.loc[ok, "kappa"], g.loc[ok, "T"], marker=cfg["marker"], ls="-",
+                    color=cfg["color"], label=_fit_label(s, a, se))  # fmt: skip
             ax.plot(
                 g.loc[~ok, "kappa"],
                 g.loc[~ok, "budget"],
                 "v",
                 mfc="none",
-                color=COLORS[s],
+                color=cfg["color"],
             )
+            # reference slope, anchored at the first point of the fit region
             gm = g[ok & (g["kappa"] >= kappa_min)]
-            if len(
-                gm
-            ):  # reference slope of the proposal, anchored at the first asymptotic point
+            if len(gm):
                 k0, t0 = gm.iloc[0]["kappa"], gm.iloc[0]["T"]
                 kk = g.loc[g["kappa"] >= kappa_min, "kappa"].to_numpy()
-                ax.plot(
-                    kk,
-                    t0 * (kk / k0) ** PROPOSAL[s]["kappa"],
-                    "--",
-                    color=COLORS[s],
-                    alpha=0.45,
-                    lw=1,
-                )
+                ax.plot(kk, t0 * (kk / k0) ** cfg["kappa_ref"], "--", color=cfg["color"],
+                        alpha=0.45, lw=1)  # fmt: skip
             ll = ls[(ls["sampler"] == s) & (ls["dimension"] == d)]
-            ax2.plot(ll["kappa_mid"], ll["slope"], "o-", color=COLORS[s])
-        if kappa_min > k_lo:
+            ax2.plot(
+                ll["kappa_mid"],
+                ll["slope"],
+                marker=cfg["marker"],
+                ls="-",
+                color=cfg["color"],
+            )
+        if kappa_min > k_lo:  # grey = not used for the fit
             for a_ in (ax, ax2):
                 a_.axvspan(k_lo / 1.3, kappa_min / 1.15, color="0.93", zorder=0)
-        for p in (1.0, 0.5):
+        for p in sorted({SAMPLERS[s]["kappa_ref"] for s in present(best)}):
             ax2.axhline(p, c="gray", ls=":", lw=1)
-        ax.set(xscale="log", yscale="log", title=f"d = {d}")
-        ax2.set(xscale="log", xlabel="κ (condition number)")
-        ax.legend(
-            fontsize=8,
-            title="fit κ ≥ %g; dashed: proposal slope" % kappa_min,
-            title_fontsize=7,
-        )
+        ax.set(xscale="log", yscale="log", title=rf"$d={d}$")
+        ax2.set(xscale="log", xlabel=r"condition number $\kappa$")
+        ax.legend(fontsize=8, title=rf"fit for $\kappa\geq{kappa_min:g}$; dashed: reference slope",
+                  title_fontsize=7)  # fmt: skip
     axes[0, 0].set_ylabel(ylabel)
-    axes[1, 0].set_ylabel("local slope  d log T / d log κ")
-    fig.suptitle(
-        f"Cost until {eps_label} ≤ ε  (best h, γ per point;  ▽ = not converged within budget)",
-        fontsize=10,
+    axes[1, 0].set_ylabel(r"local slope $\mathrm{d}\log T\,/\,\mathrm{d}\log\kappa$")
+    save(
+        fig,
+        path,
+        rf"Cost until {eps_label} $\leq\varepsilon$  (best $h,\gamma$ per point;  "
+        r"$\triangledown$ = not converged within budget)",
     )
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
 
 
 def fig_speedup(sp, kappa_min, path):
     sp = sp[sp["speedup"].notna()]
-    if sp.empty:
+    samplers = [s for s in SAMPLERS if s in set(sp["sampler"])]
+    if not samplers:
         return
-    fig, ax = plt.subplots(figsize=(5.0, 3.8))
-    for i, (d, g) in enumerate(sp.groupby("dimension")):
-        g = g.sort_values("kappa")
-        c = f"C{i}"
-        ex = g[~g["is_lower_bound"]]
-        lb = g[g["is_lower_bound"]]
-        ax.plot(ex["kappa"], ex["speedup"], "o-", color=c, label=f"d = {d}")
-        ax.plot(
-            lb["kappa"], lb["speedup"], "^", mfc="none", color=c
-        )  # ULA censored: lower bound
-        a = ex[ex["kappa"] >= kappa_min]
-        if len(a):
-            k0, s0 = a.iloc[0]["kappa"], a.iloc[0]["speedup"]
-            kk = g.loc[g["kappa"] >= kappa_min, "kappa"].to_numpy()
-            ax.plot(kk, s0 * (kk / k0) ** 0.5, "--", color=c, alpha=0.45, lw=1)
-    ax.set(
-        xscale="log",
-        yscale="log",
-        xlabel="κ",
-        ylabel="T_ULA / T_ULMC",
-        title="Speed-up of ULMC over ULA (dashed: √κ)",
+    fig, axes = plt.subplots(
+        1, len(samplers), figsize=(4.8 * len(samplers), 3.8), sharey=True, squeeze=False
     )
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    for ax, s in zip(axes[0], samplers):
+        ref = SAMPLERS[BASELINE]["kappa_ref"] - SAMPLERS[s]["kappa_ref"]
+        for i, (d, g) in enumerate(sp[sp["sampler"] == s].groupby("dimension")):
+            g = g.sort_values("kappa")
+            c = f"C{i}"
+            ex, lb = g[~g["is_lower_bound"]], g[g["is_lower_bound"]]
+            ax.plot(ex["kappa"], ex["speedup"], "o-", color=c, label=rf"$d={d}$")
+            ax.plot(
+                lb["kappa"], lb["speedup"], "^", mfc="none", color=c
+            )  # baseline censored
+            a = ex[ex["kappa"] >= kappa_min]
+            if len(a):
+                k0, s0 = a.iloc[0]["kappa"], a.iloc[0]["speedup"]
+                kk = g.loc[g["kappa"] >= kappa_min, "kappa"].to_numpy()
+                ax.plot(kk, s0 * (kk / k0) ** ref, "--", color=c, alpha=0.45, lw=1)
+        ax.set(
+            xscale="log",
+            yscale="log",
+            xlabel=r"condition number $\kappa$",
+            title=rf"{s} vs {BASELINE} (dashed: $\kappa^{{{exp_str(ref)}}}$)",
+        )
+        ax.set_ylabel(rf"speed-up $T_{{\mathrm{{{BASELINE}}}}}/T_{{\mathrm{{{s}}}}}$")
+        ax.legend(fontsize=8)
+    save(fig, path)
 
 
 def fig_T_vs_dim(best, kappa_min, path) -> bool:
@@ -429,10 +491,11 @@ def fig_T_vs_dim(best, kappa_min, path) -> bool:
     if len(dims) < 2:
         return False
     d = np.array(dims, dtype=float)
+    samplers = present(best)
     fig, axes = plt.subplots(
-        1, len(SAMPLERS), figsize=(4.5 * len(SAMPLERS), 3.6), sharey=True, squeeze=False
+        1, len(samplers), figsize=(4.5 * len(samplers), 3.6), sharey=True, squeeze=False
     )
-    for ax, s in zip(axes[0], SAMPLERS):
+    for ax, s in zip(axes[0], samplers):
         g_s = best[
             (best["sampler"] == s) & ~best["censored"] & (best["kappa"] >= kappa_min)
         ]
@@ -440,15 +503,27 @@ def fig_T_vs_dim(best, kappa_min, path) -> bool:
             g = g.sort_values("dimension")
             if g["dimension"].nunique() < 2:
                 continue
-            ax.plot(g["dimension"], g["T"] / g["T"].iloc[0], "o-", label=f"κ = {k:g}")
-        for p, ls_ in ((1.0, ":"), (0.5, "--")):
-            ax.plot(d, (d / d[0]) ** p, c="k", ls=ls_, lw=1, label=f"d^{p:g}")
-        ax.set(xscale="log", yscale="log", xlabel="d", title=s)
-    axes[0, 0].set_ylabel("T(d) / T(d_min)")
+            ax.plot(
+                g["dimension"], g["T"] / g["T"].iloc[0], "o-", label=rf"$\kappa={k:g}$"
+            )
+        # reference: the sampler's own claim (dashed) and linear growth for comparison (dotted)
+        refs = {1.0: ":"}
+        refs[SAMPLERS[s]["dim_ref"]] = (
+            "--"  # own claim overrides the dotted line if both coincide
+        )
+        for p, style in sorted(refs.items()):
+            ax.plot(
+                d,
+                (d / d[0]) ** p,
+                c="k",
+                ls=style,
+                lw=1,
+                label=rf"$d^{{{exp_str(p)}}}$",
+            )
+        ax.set(xscale="log", yscale="log", xlabel=r"dimension $d$", title=s)
+    axes[0, 0].set_ylabel(r"$T(d)\,/\,T(d_{\min})$")
     axes[0, 0].legend(fontsize=7)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    save(fig, path)
     return True
 
 
@@ -457,59 +532,51 @@ def fig_T_vs_dim(best, kappa_min, path) -> bool:
 # ---------------------------------------------------------------------------------
 def fig_diag_hyperparameters(best, path):
     dims = sorted(best["dimension"].unique())
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 3.8))
-    for s in SAMPLERS:
+    gamma_samplers = [s for s in present(best) if SAMPLERS[s]["uses_gamma"]]
+    fig, axes = plt.subplots(1, 1 + bool(gamma_samplers), figsize=(5 * (1 + bool(gamma_samplers)), 3.8),
+                             squeeze=False)  # fmt: skip
+    a1 = axes[0, 0]
+    for s in present(best):
         for i, d in enumerate(dims):
             g = best[
                 (best["sampler"] == s) & (best["dimension"] == d) & ~best["censored"]
-            ].sort_values("kappa")
+            ]
+            g = g.sort_values("kappa")
             if g.empty:
                 continue
-            a1.plot(
-                g["kappa"],
-                g["step_size"],
-                "o-",
-                color=COLORS[s],
-                alpha=0.4 + 0.6 * (i + 1) / len(dims),
-                ms=4,
-                label=f"{s}, d={d}",
-            )
+            a1.plot(g["kappa"], g["step_size"], marker=SAMPLERS[s]["marker"], ls="-",
+                    color=SAMPLERS[s]["color"], alpha=0.4 + 0.6 * (i + 1) / len(dims), ms=4,
+                    label=rf"{s}, $d={d}$")  # fmt: skip
             e = g[g["h_at_edge"]]
-            a1.plot(
-                e["kappa"], e["step_size"], "kx", ms=8
-            )  # optimum at edge of the h grid -> extend grid
+            a1.plot(e["kappa"], e["step_size"], "kx", ms=8)  # optimum at edge of h grid
+    a1.plot([], [], "kx", label="optimum at grid edge (extend grid)")
     a1.axhline(2.0, c="r", ls=":", lw=1)
-    a1.set(
-        xscale="log",
-        yscale="log",
-        xlabel="κ",
-        ylabel="best step size h*",
-        title="optimal step size (red: 2/L)",
-    )
+    a1.set(xscale="log", yscale="log", xlabel=r"condition number $\kappa$",
+           ylabel=r"best step size $h^\ast$",
+           title=r"optimal step size (red: ULA stability limit $2/L$)")  # fmt: skip
     a1.legend(fontsize=6)
-    for i, d in enumerate(dims):
-        g = best[
-            (best["sampler"] == "ULMC") & (best["dimension"] == d) & ~best["censored"]
-        ].sort_values("kappa")
-        y = [
-            GAMMA_ORDER.index(x) if x in GAMMA_ORDER else np.nan
-            for x in g["gamma_label"]
-        ]
-        a2.plot(
-            g["kappa"],
-            np.array(y) + 0.12 * (i - (len(dims) - 1) / 2),
-            "o",
-            label=f"d={d}",
-        )
-    a2.set_yticks(range(len(GAMMA_ORDER)))
-    a2.set_yticklabels(GAMMA_ORDER)
-    a2.set(
-        xscale="log", xlabel="κ", title="ULMC: which γ wins? (c/√κ = momentum regime)"
-    )
-    a2.legend(fontsize=7)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+
+    if gamma_samplers:  # which friction rule wins? (only samplers that have a gamma)
+        a2 = axes[0, 1]
+        keys = list(GAMMA_RULES)
+        for s in gamma_samplers:
+            for i, d in enumerate(dims):
+                g = best[
+                    (best["sampler"] == s)
+                    & (best["dimension"] == d)
+                    & ~best["censored"]
+                ]
+                g = g.sort_values("kappa")
+                y = [keys.index(x) if x in keys else np.nan for x in g["gamma_label"]]
+                a2.plot(g["kappa"], np.array(y) + 0.12 * (i - (len(dims) - 1) / 2), "o",
+                        color=SAMPLERS[s]["color"], alpha=0.4 + 0.6 * (i + 1) / len(dims),
+                        label=rf"{s}, $d={d}$")  # fmt: skip
+        a2.set_yticks(range(len(keys)))
+        a2.set_yticklabels(list(GAMMA_RULES.values()))
+        a2.set(xscale="log", xlabel=r"condition number $\kappa$",
+               title=r"which $\gamma$ wins? ($c/\sqrt{\kappa}$ = momentum regime)")  # fmt: skip
+        a2.legend(fontsize=7)
+    save(fig, path)
 
 
 def fig_diag_ushape(df, best, path):
@@ -525,37 +592,37 @@ def fig_diag_ushape(df, best, path):
     for i, k in enumerate(ks):
         for j, d in enumerate(ds):
             ax = axes[i, j]
-            for s in SAMPLERS:
+            for s in present(df):
+                cell = (
+                    (df["sampler"] == s) & (df["dimension"] == d) & (df["kappa"] == k)
+                )
                 b = best[
                     (best["sampler"] == s)
                     & (best["dimension"] == d)
                     & (best["kappa"] == k)
                 ]
-                r = df[
-                    (df["sampler"] == s) & (df["dimension"] == d) & (df["kappa"] == k)
-                ]
+                r = df[cell]
                 if b.empty or r.empty:
                     continue
+                # only the runs with the winning gamma (for ULA / RMULMC: all runs)
                 r = r[r["gamma_label"] == b["gamma_label"].iloc[0]].sort_values(
                     "step_size"
                 )
-                ax.plot(
-                    r["step_size"], r["final_err"], "o-", ms=3, color=COLORS[s], label=s
-                )
+                ax.plot(r["step_size"], r["final_err"], marker=SAMPLERS[s]["marker"], ls="-", ms=3,
+                        color=SAMPLERS[s]["color"], label=s)  # fmt: skip
                 if not b["censored"].iloc[0]:
                     ax.plot(b["step_size"], b["final_err"], "k*", ms=9)
                 ax.axhline(r["eps_used"].iloc[0], c="gray", ls=":")
-            ax.set(xscale="log", yscale="log", title=f"d={d}, κ={k:g}")
-    axes[-1, 0].set_xlabel("step size h")
+            ax.set(xscale="log", yscale="log", title=rf"$d={d}$, $\kappa={k:g}$")
+    axes[-1, 0].set_xlabel(r"step size $h$")
     axes[0, 0].set_ylabel("error at end of budget")
     axes[0, 0].legend(fontsize=7)
-    fig.suptitle(
-        "small h: not converged within budget   |   large h: discretisation bias   (★ = chosen h*, dotted = ε)",
-        fontsize=9,
+    save(
+        fig,
+        path,
+        r"small $h$: not converged within budget   |   large $h$: discretisation bias   "
+        r"($\star$ = chosen $h^\ast$, dotted = $\varepsilon$)",
     )
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------------
@@ -577,23 +644,35 @@ def main() -> None:
         default=100.0,
         help="exponents are fitted for kappa >= this value (below, T is dominated by constants)",
     )
-    ap.add_argument("--criterion", choices=list(CRITERIA), default="euclid")
+    ap.add_argument("--criterion", choices=list(CRITERIA), default="white")
     ap.add_argument("--cost", choices=["grads", "wall"], default="grads")
+    ap.add_argument(
+        "--first-checkpoint",
+        type=int,
+        default=5,
+        help="make_eval_steps(first=...); convergence at this step is flagged as left-censored",
+    )
+    ap.add_argument("--usetex", action="store_true",
+                    help="render text with a real LaTeX installation (default: matplotlib mathtext)")  # fmt: skip
     a = ap.parse_args()
 
+    set_style(a.usetex)
     out = Path(a.out)
     (out / "diagnostics").mkdir(parents=True, exist_ok=True)
     raw = pd.read_csv(a.csv)
 
+    ignored = sorted(set(raw["sampler"]) - set(SAMPLERS))
+    if ignored:
+        print(f"note: samplers in the csv but not in SAMPLERS are ignored: {ignored}")
+
     df = prepare(raw, a.criterion, a.cost)
-    best = best_configs(df)
+    print(f"samplers analysed: {present(df)}")
+    best = best_configs(df, a.first_checkpoint)
     best.to_csv(out / "best_configs.csv", index=False)
 
     chk = checks(df, best)
     chk.to_csv(out / "checks.csv")
-    print(
-        f"\n=== sanity ({CRITERIA[a.criterion]['label']}, cost={a.cost}) ===\n{chk.to_string()}"
-    )
+    print(f"\n=== sanity ({a.criterion}, cost={a.cost}) ===\n{chk.to_string()}")
 
     kexp = kappa_exponents(best, a.kappa_min)
     ls = local_slopes(best)
@@ -601,35 +680,30 @@ def main() -> None:
     sexp = speedup_exponents(sp, a.kappa_min)
     dexp = dim_exponents(best, a.kappa_min) if a.cost == "grads" else pd.DataFrame()
 
-    tidy = pd.concat(
-        [
-            kexp.assign(kind="kappa_exponent"),
-            sexp.assign(kind="speedup_exponent", sampler="ULA/ULMC"),
-            dexp.rename(columns={"beta": "alpha"}).assign(kind="dim_exponent")
-            if len(dexp)
-            else None,
-        ],
-        ignore_index=True,
+    parts = [kexp.assign(kind="kappa_exponent"), sexp.assign(kind="speedup_exponent")]
+    if len(dexp):
+        parts.append(dexp.rename(columns={"beta": "alpha"}).assign(kind="dim_exponent"))
+    pd.concat([p for p in parts if len(p)], ignore_index=True).to_csv(
+        out / "exponents.csv", index=False
     )
-    tidy.to_csv(out / "exponents.csv", index=False)
+
     print(
         f"\n=== T ~ kappa^alpha, fitted for kappa >= {a.kappa_min:g} (se = scatter around the line) ===\n{fmt(kexp)}"
     )
     if len(sexp):
-        print(f"\n=== speed-up ~ kappa^alpha (proposal 0.5) ===\n{fmt(sexp)}")
+        print(f"\n=== speed-up over {BASELINE} ~ kappa^alpha ===\n{fmt(sexp)}")
     if len(dexp):
         print(
-            f"\n=== T ~ d^beta at fixed kappa, median over kappa ===\n"
+            "\n=== T ~ d^beta at fixed kappa, median over kappa ===\n"
             f"{fmt(dexp.groupby('sampler')[['beta', 'proposal']].median().reset_index())}"
         )
-    for s in SAMPLERS:
-        r = df[df["sampler"] == s]["sec_per_step"].median()
-        print(f"median sec_per_step {s}: {r:.3g}")
 
     ylabel = (
-        "gradient evaluations" if a.cost == "grads" else "wall-clock seconds (ensemble)"
+        "gradient evaluations $T$"
+        if a.cost == "grads"
+        else "wall-clock seconds $T$ (ensemble)"
     )
-    eps_label = "W2 (" + CRITERIA[a.criterion]["label"] + ")"
+    eps_label = CRITERIA[a.criterion]["label"]
     fig_T_vs_kappa(
         best, kexp, ls, a.kappa_min, ylabel, eps_label, out / "fig1_T_vs_kappa.png"
     )
@@ -645,7 +719,7 @@ def main() -> None:
     # robustness: same kappa-exponents under the other criterion / cost definition (fits only, no figures)
     rob = []
     for crit, cost in [("white", "grads"), ("euclid", "grads"), ("white", "wall")]:
-        b = best_configs(prepare(raw, crit, cost))
+        b = best_configs(prepare(raw, crit, cost), a.first_checkpoint)
         rob.append(kappa_exponents(b, a.kappa_min).assign(criterion=crit, cost=cost))
     rob = pd.concat(rob, ignore_index=True)
     rob.to_csv(out / "robustness.csv", index=False)

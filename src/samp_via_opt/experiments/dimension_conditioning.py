@@ -222,7 +222,7 @@ if __name__ == "__main__":
             ),
             True,
         ),
-        "RMULMC": (lambda t, g: RMULMC(step_size=1.0, u=1.0 / t.L), False),
+        "RMULMC": (lambda t, g: RMULMC(step_size=1.0, gamma=g, u=1.0 / t.L), True),
     }
 
     cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
