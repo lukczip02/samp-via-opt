@@ -117,6 +117,7 @@ def run_grid_search(
     target_eps: float = 0.1,
     target_eps_white: float = 0.2,
     init_sigma: float = 3.0,
+    use_rel_tolerance: bool = False,
     use_float32: bool = False,
     seed: int = 0,
 ) -> pd.DataFrame:
@@ -134,6 +135,9 @@ def run_grid_search(
         target_eps_white: Convergence threshold for the target in whitened coordinates.
         num_steps: Number of steps to run for each chain.
         init_sigma: Initial standard deviation for the starting point.
+        use_rel_tolerance: Normalize convergence criterion by dimension.
+                           relative tolerance: W2 <= sqrt(d/m) * eps
+                           absolute tolerance: W2 <= sqrt(1/m) * eps
         use_float32: To improve performance, chains can be run in float32 precision.
                      Numerically critical computations still use float64.
         seed: Random seed for reproducibility.
@@ -165,18 +169,29 @@ def run_grid_search(
 
             x0 = slow_direction_init(target, n_sigma=init_sigma)
 
+            # normalisation:
+            # - with relative tolerance: W2 <= sqrt(d/m) * eps (unwhitenend)
+            #                            W2 <= sqrt(d) * eps (whitened, independent of m)
+            # - with absolute tolerance: W2 <= sqrt(1/m) * eps (unwhitenend)
+            #                            W2 <= eps (whitened)
+            norm = (
+                float(jnp.sqrt(dim / target.m))
+                if use_rel_tolerance
+                else float(jnp.sqrt(1.0 / target.m))
+            )
+            norm_white = float(jnp.sqrt(dim)) if use_rel_tolerance else 1.0
+
             # scale number of chains with dimension to keep MC noise roughly constant
             # noise^2 = E[W2^2] ~ E[|mu|_2^2] + 1/4 E[|Σ_hat - I|_F^2] ~ (d^2 + 5*d)/(4*C)
-            # floor_target = 0.35 * target_eps_white  # to be safe, actual target: 0.5*
+            # relative tolerance: O(d), absolute tolerance: O(d^2)
             floor_target = 0.7 * target_eps
-            # num_chains = int(np.ceil((dim**2 + 5 * dim) / (4 * floor_target**2)))
-            num_chains = int(np.ceil((dim + 5) / (4 * floor_target**2)))
+            num_chains = (
+                int(np.ceil((dim + 5) / (4 * floor_target**2)))
+                if use_rel_tolerance
+                else int(np.ceil((dim**2 + 5 * dim) / (4 * floor_target**2)))
+            )
             print(f"Number of chains: {num_chains}")
 
-            # normalisation: W2 <= sqrt(d/m) * eps (unwhitenend)
-            #                W2 <= sqrt(d) * eps (whitened, independent of m)
-            norm = float(jnp.sqrt(dim / target.m))
-            norm_white = float(jnp.sqrt(dim))
             floor = float(noise_floor(target, floor_key, num_chains))
             print(
                 f"MC noise floor (normalised): {floor / norm:.4f}  vs eps = {target_eps}"
@@ -242,7 +257,7 @@ if __name__ == "__main__":
     sampler_specs: dict[str, SamplerSpec] = {
         "ULA": SamplerSpec(
             factory=lambda t, g: ULA(step_size=1.0, dtype=sampler_dtype),
-            gammas=lambda kappa: 3 * [None],  # use a few runs for fair comparison
+            gammas=lambda kappa: [None],
             step_unit=lambda g: 1.0,
         ),
         # gamma: 2/sqrt(kappa) (Nesterov-optimal) plus two overdamped-like values sqrt(2.0) and 2.0
@@ -265,7 +280,32 @@ if __name__ == "__main__":
         ),
     }
 
+    ## --- Experiment 1: condition number scaling ---
+
     cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
+    # independent of dimension by using relative convergence tolerance
+    dims = [2, 16]
+
+    df_dim_kappa = run_grid_search(
+        dims=dims,
+        cond_numbers=cond_numbers,
+        rel_step_sizes=rel_step_sizes,
+        sampler_specs=sampler_specs,
+        eval_steps=make_eval_steps(cond_numbers=cond_numbers),
+        target_eps=0.1,
+        target_eps_white=0.2,
+        use_rel_tolerance=True,
+        use_float32=use_float32,
+        seed=42,
+    )
+    df_dim_kappa.to_csv(
+        f"conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_f32.csv",
+        index=False,
+    )
+
+    ## --- Experiment 2: dimension scaling ---
+
+    cond_numbers = [100.0, 300.0, 1000.0]
     dims = [2, 4, 8, 16]
 
     df_dim_kappa = run_grid_search(
@@ -276,10 +316,11 @@ if __name__ == "__main__":
         eval_steps=make_eval_steps(cond_numbers=cond_numbers),
         target_eps=0.1,
         target_eps_white=0.2,
+        use_rel_tolerance=False,
         use_float32=use_float32,
         seed=42,
     )
     df_dim_kappa.to_csv(
-        f"dimension_conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_f32.csv",
+        f"dimension_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_f32.csv",
         index=False,
     )

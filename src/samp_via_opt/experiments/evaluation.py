@@ -28,9 +28,9 @@ grads_per_step = {"ULA": 1, "ULMC": 1, "RMULA": 2, "RMULMC": 2, "TIPreL": 1}
 
 def make_eval_steps(
     cond_numbers: list[float],
-    steps_per_kappa: float = 3.0,
-    min_steps: int = 1_000,
-    max_steps: int = 30_000,
+    steps_per_kappa: float = 5.0,
+    min_steps: int = 2_000,
+    max_steps: int = 50_000,
     first: int = 5,
     rel_spacing: float = 0.05,
 ) -> list[np.ndarray]:
