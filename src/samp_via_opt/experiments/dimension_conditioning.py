@@ -284,7 +284,7 @@ if __name__ == "__main__":
 
     cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
     # independent of dimension by using relative convergence tolerance
-    dims = [2, 16]
+    dims = [64]
 
     df_dim_kappa = run_grid_search(
         dims=dims,
@@ -306,7 +306,7 @@ if __name__ == "__main__":
     ## --- Experiment 2: dimension scaling ---
 
     cond_numbers = [100.0, 300.0, 1000.0]
-    dims = [2, 4, 8, 16]
+    dims = [32]
 
     df_dim_kappa = run_grid_search(
         dims=dims,
