@@ -1,4 +1,2 @@
 sampler,cells,censored,h_at_grid_edge,left_censored,borderline_optimum,median_n_near_opt,diverged_share,floor_ok_everywhere,median_sec_per_step
-RMULMC,14,0,12,0,0,5.0,0.0,True,3.558198728250016e-05
-ULA,14,0,0,0,1,15.0,0.0,True,7.173628489749661e-06
-ULMC,14,0,0,0,4,4.5,0.16214285714285714,True,2.023296710150038e-05
+RMULMC,7,0,0,0,0,3.0,0.18154761904761904,True,0.00015700244027775

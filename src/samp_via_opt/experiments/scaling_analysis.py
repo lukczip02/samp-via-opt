@@ -69,7 +69,7 @@ SAMPLERS: dict[str, dict] = {
         color="tab:red", marker="s", kappa_ref=0.5, dim_ref=0.5, uses_gamma=True
     ),
     "RMULMC": dict(
-        color="tab:green", marker="^", kappa_ref=0.5, dim_ref=1 / 3, uses_gamma=False
+        color="tab:green", marker="^", kappa_ref=0.5, dim_ref=1 / 3, uses_gamma=True
     ),
 }
 
@@ -644,7 +644,7 @@ def main() -> None:
         default=100.0,
         help="exponents are fitted for kappa >= this value (below, T is dominated by constants)",
     )
-    ap.add_argument("--criterion", choices=list(CRITERIA), default="white")
+    ap.add_argument("--criterion", choices=list(CRITERIA), default="euclid")
     ap.add_argument("--cost", choices=["grads", "wall"], default="grads")
     ap.add_argument(
         "--first-checkpoint",

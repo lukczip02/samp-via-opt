@@ -7,11 +7,14 @@ The targets are multivariate Gaussians constructed to have the desired condition
 As a baseline a noise floor is computed to determine the Monte Carlo noise level for the given number of chains.
 """
 
+import math
 import jax
 import jax.numpy as jnp
 import pandas as pd
 import numpy as np
 from typing import Any, Callable
+from dataclasses import dataclass
+from collections.abc import Sequence
 
 from samp_via_opt.experiments.evaluation import (
     build_ensemble_evaluator,
@@ -22,12 +25,29 @@ from samp_via_opt.experiments.evaluation import (
     timed_call,
 )
 from samp_via_opt.targets.gaussian import GaussianTarget
-from samp_via_opt.samplers import ULA, RMULA, ULMC, RMULMC
+from samp_via_opt.samplers import ULA, ULMC, RMULMC
 
 
 # sampler factory builds the sampler from the target (and gamma for momentum methods)
-# step_size is a placeholder: the evaluator overwrites it via eqx.tree_at
 SamplerFactory = Callable[[GaussianTarget, float | None], Any]
+
+
+@dataclass(frozen=True)
+class SamplerSpec:
+    """
+    Allows individual fine-tuning of samplers in optimum step_size and gamma regions.
+
+    Attributes:
+        factory: (target, gamma) -> sampler. gamma is None for samplers without friction.
+        gammas: kappa -> list of friction values to try ([None] for samplers without friction).
+        step_unit: gamma -> natural unit of the step size. The grid is step_unit(gamma) * rel_step_sizes.
+                   ULMC: stability limit scales with gamma (optimum at h/gamma ~ 0.3-0.8), use gamma.
+                   ULA, RMULMC: limit hardly depends on gamma, use 1.0.
+    """
+
+    factory: SamplerFactory
+    gammas: Callable[[float], Sequence[float | None]]
+    step_unit: Callable[[float | None], float]
 
 
 def diagonal_gaussian_cov(dim: int, cond_number: float) -> jax.Array:
@@ -37,7 +57,6 @@ def diagonal_gaussian_cov(dim: int, cond_number: float) -> jax.Array:
     Args:
         dim: Dimension of the Gaussian.
         cond_number: Condition number kappa = L / m.
-        key: PRNG key for random number generation.
 
     Returns:
         Covariance matrix of shape (dim, dim).
@@ -92,9 +111,8 @@ def clustered_bimodal_gaussian_cov(dim: int, cond_number: float) -> jax.Array:
 def run_grid_search(
     dims: list[int],
     cond_numbers: list[float],
-    step_sizes: jax.Array,
-    gamma_fn: Callable[[float], list[float]],
-    sampler_registry: dict[str, tuple[SamplerFactory, bool]],
+    rel_step_sizes: jax.Array,
+    sampler_specs: dict[str, SamplerSpec],
     eval_steps: list[np.ndarray],
     target_eps: float = 0.1,
     target_eps_white: float = 0.2,
@@ -108,9 +126,9 @@ def run_grid_search(
     Args:
         dims: List of dimensions to test.
         cond_numbers: List of condition numbers to test.
-        step_sizes: Array of step sizes to evaluate.
-        gamma_fn: Function that returns a list of gamma values for a given condition number.
-        sampler_registry: Dictionary mapping sampler names to (factory, uses_gamma) tuples.
+        rel_step_sizes: Shared relative step-size window. The step sizes actually run for a sampler are
+                        spec.step_unit(gamma) * rel_step_sizes.
+        sampler_specs: Dictionary mapping sampler names to their SamplerSpec.
         eval_steps: Step numbers at which to evaluate convergence metrics. Unique for each kappa.
         target_eps: Convergence threshold for the target.
         target_eps_white: Convergence threshold for the target in whitened coordinates.
@@ -149,12 +167,14 @@ def run_grid_search(
 
             # scale number of chains with dimension to keep MC noise roughly constant
             # noise^2 = E[W2^2] ~ E[|mu|_2^2] + 1/4 E[|Σ_hat - I|_F^2] ~ (d^2 + 5*d)/(4*C)
-            floor_target = 0.35 * target_eps_white  # to be safe, actual target: 0.5*
+            # floor_target = 0.35 * target_eps_white  # to be safe, actual target: 0.5*
+            floor_target = 0.7 * target_eps
             # num_chains = int(np.ceil((dim**2 + 5 * dim) / (4 * floor_target**2)))
             num_chains = int(np.ceil((dim + 5) / (4 * floor_target**2)))
             print(f"Number of chains: {num_chains}")
 
-            # normalisation: sqrt(d/m)
+            # normalisation: W2 <= sqrt(d/m) * eps (unwhitenend)
+            #                W2 <= sqrt(d) * eps (whitened, independent of m)
             norm = float(jnp.sqrt(dim / target.m))
             norm_white = float(jnp.sqrt(dim))
             floor = float(noise_floor(target, floor_key, num_chains))
@@ -167,20 +187,17 @@ def run_grid_search(
                 f"whitened floor: {floor_white / norm_white:.4f}  vs eps_white = {target_eps_white}"
             )
 
-            gammas = gamma_fn(kappa)
-
-            for name, (factory, uses_gamma) in sampler_registry.items():
-                for gamma in gammas if uses_gamma else [None] * len(gammas):
-                    sampler = factory(target, gamma)
+            for name, spec in sampler_specs.items():
+                for gamma in spec.gammas(kappa):
+                    sampler = spec.factory(target, gamma)
+                    step_sizes = spec.step_unit(gamma) * rel_step_sizes
                     eval_fn = build_ensemble_evaluator(
                         sampler, num_chains, eval_h, use_float32
                     )
                     metrics, sec = timed_call(eval_fn, step_sizes, x0, run_key, target)
 
-                    if gamma is None:
-                        print(f"{name} done in {sec:.2f}s")
-                    else:
-                        print(f"{name} (gamma={gamma:.3f}) done in {sec:.2f}s")
+                    label = name if gamma is None else f"{name} (gamma={gamma:.3f})"
+                    print(f"{label} done in {sec:.2f}s")
 
                     df = convergence_table(
                         metrics,
@@ -209,42 +226,53 @@ if __name__ == "__main__":
 
     # option to use float32 precision for most of the computations inside of the chains
     # numerically critical computations are still kept in float64
-    use_float32 = False
+    use_float32 = True
     sampler_dtype = jnp.float32 if use_float32 else jnp.float64
 
-    sampler_registry_dim_kappa: dict[str, tuple[SamplerFactory, bool]] = {
-        # name: (factory, uses_gamma)
-        "ULA": (lambda t, g: ULA(step_size=1.0, dtype=sampler_dtype), False),
-        "RMULA": (lambda t, g: RMULA(step_size=1.0, dtype=sampler_dtype), False),
-        "ULMC": (
-            lambda t, g: ULMC(
+    # common relative step-size window: 48 log-spaced points on [0.1, 4] (about 8 % spacing)
+    # relative to each sampler's natural unit (see SamplerSpec.step_unit)
+    # previously (empirically) observed optima / stability limits in these units:
+    #   ULA:    h* ~ 0.6, stability limit 2/L = 2 (L = 1 by construction)
+    #   ULMC:   h/gamma* ~ 0.5-2.2, convergence cliff at about h/gamma ~ 2.3
+    #   RMULMC: h* ~ 0.4-1.2 for gamma = c/sqrt(kappa), cliff at about 0.6-1.9
+    # generous margins on both sides of these empirical findings
+    rel_step_sizes = jnp.logspace(jnp.log10(0.1), jnp.log10(4.0), 48)
+
+    # step_size is a placeholder: the evaluator overwrites it via eqx.tree_at
+    sampler_specs: dict[str, SamplerSpec] = {
+        "ULA": SamplerSpec(
+            factory=lambda t, g: ULA(step_size=1.0, dtype=sampler_dtype),
+            gammas=lambda kappa: 3 * [None],  # use a few runs for fair comparison
+            step_unit=lambda g: 1.0,
+        ),
+        # gamma: 2/sqrt(kappa) (Nesterov-optimal) plus two overdamped-like values sqrt(2.0) and 2.0
+        "ULMC": SamplerSpec(
+            factory=lambda t, g: ULMC(
                 step_size=1.0, alpha=g, beta=1.0 / t.L, dtype=sampler_dtype
             ),
-            True,
+            gammas=lambda kappa: [2.0 / math.sqrt(kappa), math.sqrt(2.0), 2.0],
+            step_unit=lambda g: g if g is not None else 1.0,
         ),
-        "RMULMC": (lambda t, g: RMULMC(step_size=1.0, gamma=g, u=1.0 / t.L), True),
+        # gamma: c/sqrt(kappa) with c in {1, 2, 4} plus 2.0
+        # uses gamma extendend version of RMULMC, gamma = 2.0 is the original Shen & Lee.
+        "RMULMC": SamplerSpec(
+            factory=lambda t, g: RMULMC(
+                step_size=1.0, gamma=g, u=1.0 / t.L, dtype=sampler_dtype
+            ),
+            gammas=lambda kappa: [c / math.sqrt(kappa) for c in (1.0, 2.0, 4.0)]
+            + [2.0],
+            step_unit=lambda g: 1.0,
+        ),
     }
 
     cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
+    dims = [2, 4, 8, 16]
 
     df_dim_kappa = run_grid_search(
-        dims=[2, 10, 50],
+        dims=dims,
         cond_numbers=cond_numbers,
-        # upper stability limit: h=2/L=2, L=1 by construction
-        # allow reasonably small step sizes for small kappas
-        # to reach accuracy eps: T_ULA ~ kappa*log (1 / eps), T_ULMC (in theory) ~ sqrt(kappa)*log(1 / eps)
-        # T_ULA ~ 2.3*kappa -> h_min_ULA = 2.3*kappa / N !<= 2 -> choose at least N ~ 2*kappa
-        step_sizes=jnp.logspace(-3, jnp.log10(1.95), 40),
-        # optimal gamma (Nesterov): 2*sqrt(m)=2/sqrt(kappa), also allow 0.5* and 2.0* that theoretical value
-        # sqrt(2*L)=sqrt(2) and 2 from ULMC sampling theorems
-        gamma_fn=lambda kappa: [
-            float(1.0 / jnp.sqrt(kappa)),
-            float(2.0 / jnp.sqrt(kappa)),
-            float(4.0 / jnp.sqrt(kappa)),
-            float(jnp.sqrt(2)),
-            2.0,
-        ],
-        sampler_registry=sampler_registry_dim_kappa,
+        rel_step_sizes=rel_step_sizes,
+        sampler_specs=sampler_specs,
         eval_steps=make_eval_steps(cond_numbers=cond_numbers),
         target_eps=0.1,
         target_eps_white=0.2,
@@ -252,5 +280,6 @@ if __name__ == "__main__":
         seed=42,
     )
     df_dim_kappa.to_csv(
-        "dimension_conditioning_scaling_results_d2__d10_e01_f64.csv", index=False
+        f"dimension_conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_f32.csv",
+        index=False,
     )

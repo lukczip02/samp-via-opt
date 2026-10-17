@@ -28,9 +28,9 @@ grads_per_step = {"ULA": 1, "ULMC": 1, "RMULA": 2, "RMULMC": 2, "TIPreL": 1}
 
 def make_eval_steps(
     cond_numbers: list[float],
-    steps_per_kappa: float = 10.0,
-    min_steps: int = 2_000,
-    max_steps: int = 50_000,
+    steps_per_kappa: float = 3.0,
+    min_steps: int = 1_000,
+    max_steps: int = 30_000,
     first: int = 5,
     rel_spacing: float = 0.05,
 ) -> list[np.ndarray]:
@@ -40,7 +40,7 @@ def make_eval_steps(
     Args:
         cond_numbers: List of kappas that each get their own set of evaluation points.
         steps_per_kappa: Factor that increases the maximimum number of steps for increasing kappa.
-        min_steps: Minimum number of evaluation points.
+        min_steps: Minimum number of sampler steps.
         max_steps: Maximum number of sampler steps.
         first: First index at which an evaluation point is set.
         rel_spacing: Relative spacing between evaluation points.
@@ -342,7 +342,7 @@ def build_ensemble_evaluator(
                 sampler, target, x0, h_k[0], h_k[1], num_chains, eval_steps, use_float32
             ),
             (step_sizes, keys),
-            batch_size=20,
+            batch_size=len(step_sizes) // 2,  # use even number of step sizes
         )
 
     return eqx.filter_jit(eval_fn)
