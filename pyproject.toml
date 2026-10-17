@@ -8,9 +8,8 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    # "jax[cuda12]; sys_platform == 'linux'",
-    # "jax; sys_platform != 'linux'",
-    "jax",
+    "jax[cuda12]; sys_platform == 'linux'",
+    "jax; sys_platform != 'linux'",
     "equinox",
     "matplotlib",
     "pandas",
