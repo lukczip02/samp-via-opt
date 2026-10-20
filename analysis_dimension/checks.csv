@@ -1,0 +1,5 @@
+sampler,cells,censored,step_at_edge,left_censored,borderline,median_n_near_optimal,diverged_share,floor_ok_everywhere
+RMULMC,15,0,0,0,2,3.0,0.20902777777777778,True
+RMULMC_g2,15,0,0,0,4,4.0,0.0,True
+ULA,15,0,0,0,7,4.0,0.1875,True
+ULMC,15,0,0,0,11,5.0,0.1259259259259259,True

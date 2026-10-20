@@ -160,7 +160,7 @@ def run_grid_search(
 
             target = GaussianTarget(
                 mean=jnp.zeros(dim),
-                cov=clustered_bimodal_gaussian_cov(dim, kappa),
+                cov=diagonal_gaussian_cov(dim, kappa),
                 diag=True,
             )
             target_white = GaussianTarget(
@@ -284,7 +284,7 @@ if __name__ == "__main__":
 
     cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
     # independent of dimension by using relative convergence tolerance
-    dims = [64]
+    dims = [2, 16]
 
     df_dim_kappa = run_grid_search(
         dims=dims,
@@ -299,14 +299,14 @@ if __name__ == "__main__":
         seed=42,
     )
     df_dim_kappa.to_csv(
-        f"conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_f32.csv",
+        f"conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_log_f32.csv",
         index=False,
     )
 
     ## --- Experiment 2: dimension scaling ---
 
     cond_numbers = [100.0, 300.0, 1000.0]
-    dims = [32]
+    dims = [2, 4, 8, 16, 32]
 
     df_dim_kappa = run_grid_search(
         dims=dims,
@@ -321,6 +321,6 @@ if __name__ == "__main__":
         seed=42,
     )
     df_dim_kappa.to_csv(
-        f"dimension_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_f32.csv",
+        f"dimension_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_log_f32.csv",
         index=False,
     )
