@@ -96,7 +96,6 @@ class SamplerConfig:
     only_gamma: str | None = None
 
 
-# kappa_exponent of the RMULMC variants are hypotheses: "RMULMC" accelerates like ULMC;
 # "RMULMC_g2" has gamma = 2 >> 2 / sqrt(kappa) (overdamped regime), so ULA-like kappa^1 is expected.
 SAMPLERS: dict[str, SamplerConfig] = {
     "ULA": SamplerConfig(
@@ -110,15 +109,25 @@ SAMPLERS: dict[str, SamplerConfig] = {
         has_free_gamma=True, step_in_gamma_units=True,
     ),
     "RMULMC": SamplerConfig(
-        label="RMULMC", color="tab:green", marker="^",
+        label="RM-ULMC", color="tab:green", marker="^",
         kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
         has_free_gamma=True,
     ),
     "RMULMC_g2": SamplerConfig(
-        label=r"RMULMC ($\gamma=2$)", color="tab:orange", marker="D",
-        kappa_exponent=1.0, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
-        has_free_gamma=False, subscript=r"\mathrm{RMULMC},\gamma{=}2",
+        label=r"RM-ULMC ($\gamma=2$)", color="tab:orange", marker="D",
+        kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
+        has_free_gamma=False, subscript=r"\mathrm{RM-ULMC},\gamma{=}2",
         base_sampler="RMULMC", only_gamma="2",
+    ),
+    "RMULMCAdv": SamplerConfig(
+        label="RM-ULMC_Adv", color="tab:purple", marker="v",
+        kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
+        has_free_gamma=True,
+    ),
+    "RMULMCGamma": SamplerConfig(
+        label="RM-ULMC-Gamma", color="tab:brown", marker="X",
+        kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
+        has_free_gamma=True,
     ),
 }  # fmt: skip
 
@@ -276,12 +285,12 @@ def format_table(table: pd.DataFrame) -> str:
 def save_figure(figure: plt.Figure, path: Path, title: str | None = None) -> None:
     """Applies the layout, optionally adds a title, saves and closes the figure."""
     if title:
-        figure.suptitle(title, fontsize=14)
+        figure.suptitle(title, fontsize=13)
         figure.tight_layout(rect=(0, 0, 1, 0.95))
     else:
         figure.tight_layout()
     figure.savefig(
-        path, dpi=150, bbox_inches="tight"
+        path, dpi=300, bbox_inches="tight"
     )  # also keeps legends placed outside
     plt.close(figure)
 
@@ -695,8 +704,9 @@ def plot_cost_vs_kappa(best: pd.DataFrame, fits: pd.DataFrame, slopes: pd.DataFr
         )
         cost_axis.legend(fontsize=8, title=legend_title, title_fontsize=7)
     axes[0, 0].set_ylabel("gradient evaluations $T$")
-    axes[1, 0].set_ylabel(r"local slope $\mathrm{d}\log T\,/\,\mathrm{d}\log\kappa$")
-    headline = r"Cost $T$ vs condition number (best $h,\gamma$ per point; $\triangledown$ = not converged)"
+    axes[1, 0].set_ylabel(r"local slope $\mathrm{d}\log(T)\,/\,\mathrm{d}\log(\kappa)$")
+    # headline = r"Cost $T$ vs condition number (best $h,\gamma$ per point; $\triangledown$ = not converged)"
+    headline = r"Cost $T$ (gradient evaluations) vs condition number (best $h,\gamma$ per point)"
     save_figure(figure, path, setup.title(headline))
 
 
@@ -712,9 +722,26 @@ def plot_speedup(speedups: pd.DataFrame, setup: Setup, path: Path) -> None:
     samplers = [name for name in SAMPLERS if name in set(speedups["sampler"])]
     if not samplers:
         return
-    figure, axes = plt.subplots(1, len(samplers), figsize=(4.8 * len(samplers), 4.0),
-                                sharey=True, squeeze=False)  # fmt: skip
-    for axis, sampler in zip(axes[0], samplers):
+
+    max_columns = 2
+    num_rows = -(-len(samplers) // max_columns)  # ceil division
+    figure = plt.figure(figsize=(4.3 * max_columns, 3.0 * num_rows))
+    grid = figure.add_gridspec(num_rows, 2 * max_columns)
+    panel_axes = []
+    for index in range(len(samplers)):
+        row, column = divmod(index, max_columns)
+        panels_in_row = min(max_columns, len(samplers) - row * max_columns)
+        if panels_in_row == 1:  # lone panel in the last row: center it
+            columns = slice(1, 3)
+        else:
+            columns = slice(2 * column, 2 * column + 2)
+        panel_axes.append(
+            figure.add_subplot(
+                grid[row, columns], sharey=panel_axes[0] if panel_axes else None
+            )
+        )
+
+    for axis, sampler in zip(panel_axes, samplers):
         reference = SAMPLERS[BASELINE].kappa_exponent - SAMPLERS[sampler].kappa_exponent
         for color_index, (dimension, group) in enumerate(
             speedups[speedups["sampler"] == sampler].groupby("dimension")
@@ -756,10 +783,10 @@ def plot_speedup(speedups: pd.DataFrame, setup: Setup, path: Path) -> None:
             rf"speed-up $T_{{\mathrm{{{BASELINE}}}}}/T_{{{sampler_subscript(sampler)}}}$"
         )
         axis.legend(fontsize=8)
+
     headline = (
-        r"Speed-up over "
-        + BASELINE
-        + r" ($\triangle$ = lower bound, baseline not converged)"
+        r"Speed-up over " + BASELINE + r" based on cost $T$ (gradient evaluations)"
+        # + r" ($\triangle$ = lower bound, baseline not converged)"
     )
     save_figure(figure, path, setup.title(headline))
 
@@ -769,6 +796,7 @@ def plot_cost_vs_dimension(best: pd.DataFrame, setup: Setup, path: Path) -> bool
 
     The dashed line is the theoretical reference (flat for the relative tolerance, d^p for the
     absolute tolerance). The legend gives the fitted exponent beta (cost ~ d^beta) per kappa.
+    Panels are arranged with at most two per row; a lone panel in the last row is centered.
 
     Args:
         best: Output of ``select_best_configs``.
@@ -783,10 +811,29 @@ def plot_cost_vs_dimension(best: pd.DataFrame, setup: Setup, path: Path) -> bool
         return False
     dimension_values = np.array(dimensions, dtype=float)
     samplers = present_samplers(best)
-    figure, axes = plt.subplots(1, len(samplers), figsize=(4.2 * len(samplers), 4.0),
-                                sharey=True, squeeze=False)  # fmt: skip
+
+    max_columns = 2
+    num_rows = -(-len(samplers) // max_columns)  # ceil division
+    figure = plt.figure(figsize=(4.3 * max_columns, 3.0 * num_rows))
+    grid = figure.add_gridspec(num_rows, 2 * max_columns)
+    panel_axes = []
+    is_leftmost = []
+    for index in range(len(samplers)):
+        row, column = divmod(index, max_columns)
+        panels_in_row = min(max_columns, len(samplers) - row * max_columns)
+        if panels_in_row == 1:  # lone panel in the last row: center it
+            columns = slice(1, 3)
+        else:
+            columns = slice(2 * column, 2 * column + 2)
+        panel_axes.append(
+            figure.add_subplot(
+                grid[row, columns], sharey=panel_axes[0] if panel_axes else None
+            )
+        )
+        is_leftmost.append(column == 0 or panels_in_row == 1)
+
     plotted = []
-    for axis, sampler in zip(axes[0], samplers):
+    for axis, sampler in zip(panel_axes, samplers):
         candidates = best[(best["sampler"] == sampler) & ~best["censored"]
                           & (best["kappa"] >= setup.kappa_min)]  # fmt: skip
         for kappa, group in candidates.groupby("kappa"):
@@ -817,13 +864,19 @@ def plot_cost_vs_dimension(best: pd.DataFrame, setup: Setup, path: Path) -> bool
         axis.set_xticks(dimension_values)
         axis.set_xticklabels([f"{int(value)}" for value in dimension_values])
         axis.minorticks_off()
-    set_readable_log_ticks(axes[0, 0], np.concatenate(plotted))
-    axes[0, 0].set_ylabel(r"$T(d)\,/\,T(d_{\min})$")
-    axes[0, 0].legend(fontsize=6.5)
+        axis.legend(fontsize=6.5)
+    set_readable_log_ticks(panel_axes[0], np.concatenate(plotted))
+    for axis, leftmost in zip(panel_axes, is_leftmost):
+        if leftmost:
+            axis.set_ylabel(r"$T(d)\,/\,T(d_{\min})$")
     if setup.tolerance == "relative":
-        headline = r"Dimension dependence of the cost (theory for the relative tolerance: independent of $d$)"
+        headline = (
+            r"Cost $T$ (gradient evaluations) vs dimension (best $h,\gamma$ per point)"
+        )
     else:
-        headline = r"Dimension dependence of the cost (theory for the absolute tolerance: $T\sim d^{p}$)"
+        headline = (
+            r"Cost $T$ (gradient evaluations) vs dimension (best $h,\gamma$ per point)"
+        )
     save_figure(figure, path, setup.title(headline))
     return True
 
@@ -846,7 +899,7 @@ def plot_step_size_and_gamma(best: pd.DataFrame, setup: Setup, path: Path) -> No
     ]
     num_panels = 1 + bool(gamma_samplers)
     figure, axes = plt.subplots(
-        1, num_panels, figsize=(5.4 * num_panels, 5.2), squeeze=False
+        1, num_panels, figsize=(4.3 * num_panels, 5.2), squeeze=False
     )
     step_axis = axes[0, 0]
 
@@ -891,7 +944,7 @@ def plot_step_size_and_gamma(best: pd.DataFrame, setup: Setup, path: Path) -> No
         gamma_axis.set_yticks(range(len(rule_keys)))
         gamma_axis.set_yticklabels(list(GAMMA_RULES.values()))
         gamma_axis.set(xscale="log", xlabel=r"condition number $\kappa$",
-                       title=r"winning $\gamma$ ($c/\sqrt{\kappa}$ = momentum regime)")  # fmt: skip
+                       title=r"best $\gamma$ ($c/\sqrt{\kappa}$ = momentum regime)")  # fmt: skip
         gamma_axis.legend(
             fontsize=6, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.2)
         )

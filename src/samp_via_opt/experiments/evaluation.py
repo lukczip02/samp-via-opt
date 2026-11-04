@@ -18,7 +18,15 @@ import pandas as pd
 from samp_via_opt.diagnostics import gaussian_wasserstein_distance
 
 # gradient evaluations per step (cost model for iteration-vs-gradient comparisons)
-grads_per_step = {"ULA": 1, "ULMC": 1, "RMULA": 2, "RMULMC": 2, "TIPreL": 1}
+grads_per_step = {
+    "ULA": 1,
+    "ULMC": 1,
+    "RMULA": 2,
+    "RMULMC": 2,
+    "RMULMCAdv": 3,
+    "RMULMCGamma": 2,
+    "TIPreL": 1,
+}
 
 
 # ----------------------------------------------------------------------------------
