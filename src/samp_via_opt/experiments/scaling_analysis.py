@@ -195,7 +195,7 @@ class Setup:
         scale = "" if scale == "1" else rf"\,{scale}"
         return (
             rf"${cols.w2_symbol} \leq {cols.epsilon_symbol}{scale}$ "
-            rf"({self.tolerance} tolerance, ${cols.epsilon_symbol}={self.epsilon:g}$)"
+            rf"(${cols.epsilon_symbol}={self.epsilon:g}$)"
         )
 
     def title(self, headline: str) -> str:
@@ -256,12 +256,19 @@ def format_table(table: pd.DataFrame) -> str:
 
 
 def save_figure(figure: plt.Figure, path: Path, title: str | None = None) -> None:
-    """Applies the layout, optionally adds a title, saves and closes the figure."""
+    """Applies the layout, optionally adds a title, saves and closes the figure.
+
+    Figures created with ``layout="constrained"`` keep their layout engine; all
+    others get ``tight_layout()``.
+    """
+    has_engine = figure.get_layout_engine() is not None
     if title:
         figure.suptitle(title, fontsize=13)
-        figure.tight_layout(rect=(0, 0, 1, 0.95))
-    else:
-        figure.tight_layout()
+    if not has_engine:
+        if title:
+            figure.tight_layout(rect=(0, 0, 1, 0.95))
+        else:
+            figure.tight_layout()
     figure.savefig(
         path, dpi=300, bbox_inches="tight"
     )  # also keeps legends placed outside
@@ -770,69 +777,161 @@ def plot_step_size_and_gamma(best: pd.DataFrame, setup: Setup, path: Path) -> No
     """Figure 3: absolute step size and winning friction rule of the optimal configurations.
 
     Left: optimal step size h* (absolute, so samplers can be compared directly; ULMC's h*
-    scales with its gamma). Right: which friction rule wins, for samplers with a free gamma.
-    Crosses mark optima at the edge of the step-size grid, i.e. where the grid should be extended.
-
-    Args:
-        best: Output of select_best_configs().
-        setup: Analysis settings.
-        path: Output file.
+    scales with its gamma). Right: stacked heatmaps showing which friction rule wins for
+    each (kappa, d) grid cell, for samplers with a free gamma.
     """
     dimensions = sorted(best["dimension"].unique())
+    kappas = sorted(best["kappa"].unique())
     gamma_samplers = [
         name for name in present_samplers(best) if SAMPLERS[name].has_free_gamma
     ]
     num_panels = 1 + bool(gamma_samplers)
-    figure, axes = plt.subplots(
-        1, num_panels, figsize=(4.3 * num_panels, 5.2), squeeze=False
-    )
-    step_axis = axes[0, 0]
+    figure = plt.figure(figsize=(4.3 * num_panels, 5), layout="constrained")
+    if gamma_samplers:
+        left_fig, right_fig = figure.subfigures(
+            1, 2, width_ratios=[1.4, 1.0], wspace=0.03
+        )
+    else:
+        left_fig = figure.subfigures(1, 1)
+    step_axis = left_fig.subplots()
 
     def shade(dimension_index: int) -> float:
         """Opacity that increases with the dimension."""
         return 0.4 + 0.6 * (dimension_index + 1) / len(dimensions)
 
+    # --- Left subplot: optimal step size ---
     for sampler in present_samplers(best):
         config = SAMPLERS[sampler]
         for dimension_index, dimension in enumerate(dimensions):
-            cell = best[(best["sampler"] == sampler) & (best["dimension"] == dimension)
-                        & ~best["censored"]].sort_values("kappa")  # fmt: skip
+            cell = best[
+                (best["sampler"] == sampler)
+                & (best["dimension"] == dimension)
+                & ~best["censored"]
+            ].sort_values("kappa")
             if cell.empty:
                 continue
-            step_axis.plot(cell["kappa"], cell["step_size"], marker=config.marker, ls="-", ms=4,
-                           color=config.color, alpha=shade(dimension_index),
-                           label=rf"{config.label}, $d={dimension}$")  # fmt: skip
+            step_axis.plot(
+                cell["kappa"],
+                cell["step_size"],
+                marker=config.marker,
+                ls="-",
+                ms=4,
+                color=config.color,
+                alpha=shade(dimension_index),
+                label=rf"{config.label}, $d={dimension}$",
+            )
             at_edge = cell[cell["step_at_edge"]]
             step_axis.plot(at_edge["kappa"], at_edge["step_size"], "kx", ms=8)
-    step_axis.plot([], [], "kx", label="optimum at grid edge (extend grid)")
-    step_axis.axhline(ULA_STABILITY_LIMIT, c="r", ls=":", lw=1)
-    step_axis.set(xscale="log", yscale="log", xlabel=r"condition number $\kappa$",
-                  ylabel=r"optimal step size $h^\ast$",
-                  title=r"step size (red: ULA stability limit $2/L$)")  # fmt: skip
-    step_axis.legend(fontsize=6, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.2))
 
+    step_axis.plot([], [], "kx", label="optimum at grid edge (extend grid)")
+    step_axis.axhline(
+        ULA_STABILITY_LIMIT, c="r", ls=":", lw=1, label=r"ULA stability limit $2/L$"
+    )
+    step_axis.set(
+        xscale="log",
+        yscale="log",
+        xlabel=r"condition number $\kappa$",
+        ylabel=r"optimal step size $h^\ast$",
+        title="step size",
+    )
+    step_axis.legend(
+        fontsize=6.5, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.14)
+    )
+
+    # --- Right subplots: stacked categorical heatmaps ---
     if gamma_samplers:
-        gamma_axis = axes[0, 1]
         rule_keys = list(GAMMA_RULES)
-        for sampler_index, sampler in enumerate(gamma_samplers):
-            for dimension_index, dimension in enumerate(dimensions):
-                cell = best[(best["sampler"] == sampler) & (best["dimension"] == dimension)
-                            & ~best["censored"]].sort_values("kappa")  # fmt: skip
-                rule_positions = np.array([rule_keys.index(rule) if rule in rule_keys else np.nan
-                                           for rule in cell["gamma_rule"]])  # fmt: skip
-                # offsets per sampler and per dimension keep overlapping points visible
-                offset = (0.28 * (sampler_index - (len(gamma_samplers) - 1) / 2)
-                          + 0.08 * (dimension_index - (len(dimensions) - 1) / 2))  # fmt: skip
-                gamma_axis.plot(cell["kappa"], rule_positions + offset, "o",
-                                color=SAMPLERS[sampler].color, alpha=shade(dimension_index),
-                                label=rf"{SAMPLERS[sampler].label}, $d={dimension}$")  # fmt: skip
-        gamma_axis.set_yticks(range(len(rule_keys)))
-        gamma_axis.set_yticklabels(list(GAMMA_RULES.values()))
-        gamma_axis.set(xscale="log", xlabel=r"condition number $\kappa$",
-                       title=r"best $\gamma$ ($c/\sqrt{\kappa}$ = momentum regime)")  # fmt: skip
-        gamma_axis.legend(
-            fontsize=6, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.2)
+        rule_labels = list(GAMMA_RULES.values())
+        num_rules = len(rule_keys)
+
+        cmap = plt.get_cmap("YlGnBu", num_rules).copy()
+        cmap.set_bad(color="0.92")  # censored or missing grid cells
+
+        kappa_labels = [
+            rf"$10^{{{int(round(np.log10(k)))}}}$"
+            if np.isclose(np.log10(k) % 1, 0)
+            else ""
+            for k in kappas
+        ]
+
+        heat_axes = right_fig.subplots(len(gamma_samplers), 1, squeeze=False)[:, 0]
+
+        last_im = None
+        for sampler_index, (sampler, ax) in enumerate(zip(gamma_samplers, heat_axes)):
+            grid = np.full((len(dimensions), len(kappas)), np.nan)
+            cell = best[(best["sampler"] == sampler) & ~best["censored"]]
+            for _, row in cell.iterrows():
+                if row["gamma_rule"] in rule_keys:
+                    d_idx = dimensions.index(row["dimension"])
+                    k_idx = kappas.index(row["kappa"])
+                    grid[d_idx, k_idx] = rule_keys.index(row["gamma_rule"])
+
+            last_im = ax.imshow(
+                grid,
+                aspect="auto",
+                origin="lower",
+                cmap=cmap,
+                vmin=-0.5,
+                vmax=num_rules - 0.5,
+            )
+
+            # Print the winning rule label inside each cell
+            for d_idx in range(len(dimensions)):
+                for k_idx in range(len(kappas)):
+                    val = grid[d_idx, k_idx]
+                    if np.isnan(val):
+                        continue
+                    rule_idx = int(val)
+                    text_color = "white" if rule_idx >= num_rules - 2 else "black"
+                    ax.text(
+                        k_idx,
+                        d_idx,
+                        rule_labels[rule_idx],
+                        ha="center",
+                        va="center",
+                        fontsize=6.5,
+                        color=text_color,
+                    )
+
+            # Crisp white cell borders via minor gridlines
+            ax.set_xticks(np.arange(-0.5, len(kappas), 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, len(dimensions), 1), minor=True)
+            ax.grid(which="minor", color="white", lw=1.5)
+            ax.tick_params(which="minor", bottom=False, left=False)
+
+            ax.set_yticks(range(len(dimensions)))
+            ax.set_yticklabels(dimensions, fontsize=8)
+            ax.set_ylabel(r"$d$", fontsize=9)
+            ax.set_xticks(range(len(kappas)))
+
+            if sampler_index == len(gamma_samplers) - 1:
+                ax.set_xticklabels(kappa_labels)
+                ax.set_xlabel(r"condition number $\kappa$")
+            else:
+                ax.tick_params(labelbottom=False)
+
+            header = (
+                rf"best $\gamma$: {SAMPLERS[sampler].label}"
+                if sampler_index == 0
+                else SAMPLERS[sampler].label
+            )
+            ax.set_title(header, fontsize=9.5, loc="left", pad=4)
+
+        cbar = right_fig.colorbar(
+            last_im,
+            ax=heat_axes,
+            orientation="horizontal",
+            location="bottom",
+            ticks=range(num_rules),
+            fraction=0.07,
+            pad=0.05,
+            aspect=25,
         )
+        cbar.ax.set_xticklabels(rule_labels, fontsize=7.5)
+        cbar.set_label(
+            r"friction rule ($c/\sqrt{\kappa}$ = momentum regime)", fontsize=8
+        )
+
     save_figure(figure, path, setup.title("Optimal hyperparameters"))
 
 
