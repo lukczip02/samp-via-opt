@@ -25,7 +25,7 @@ from samp_via_opt.experiments.evaluation import (
     timed_call,
 )
 from samp_via_opt.targets.gaussian import GaussianTarget
-from samp_via_opt.samplers import ULA, ULMC, RMULMC, RMULMCAdv, RMULMCGamma
+from samp_via_opt.samplers import ULA, ULMC, RMULMC, RMULMCAdv
 
 
 # sampler factory builds the sampler from the target (and gamma for momentum methods)
@@ -278,14 +278,6 @@ if __name__ == "__main__":
             + [2.0],
             step_unit=lambda g: 1.0,
         ),
-        "RMULMCgamma": SamplerSpec(
-            factory=lambda t, g: RMULMCGamma(
-                step_size=1.0, gamma=g, u=1.0 / t.L, dtype=sampler_dtype
-            ),
-            gammas=lambda kappa: [c / math.sqrt(kappa) for c in (1.0, 2.0, 4.0)]
-            + [2.0],
-            step_unit=lambda g: 1.0,
-        ),
         "RMULMCAdv": SamplerSpec(
             factory=lambda t, g: RMULMCAdv(
                 step_size=1.0, gamma=g, beta=1.0 / t.L, dtype=sampler_dtype
@@ -300,7 +292,7 @@ if __name__ == "__main__":
 
     cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
     # independent of dimension by using relative convergence tolerance
-    dims = [2, 16]
+    dims = [2, 16, 64]
 
     df_dim_kappa = run_grid_search(
         dims=dims,
@@ -315,28 +307,28 @@ if __name__ == "__main__":
         seed=42,
     )
     df_dim_kappa.to_csv(
-        f"conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_log_f32.csv",
+        f"conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_RMULMCAdv_f32.csv",
         index=False,
     )
 
-    # ## --- Experiment 2: dimension scaling ---
+    ## --- Experiment 2: dimension scaling ---
 
-    # cond_numbers = [100.0, 300.0, 1000.0]
-    # dims = [2, 4, 8, 16, 32]
+    cond_numbers = [100.0, 300.0, 1000.0]
+    dims = [2, 4, 8, 16, 32]
 
-    # df_dim_kappa = run_grid_search(
-    #     dims=dims,
-    #     cond_numbers=cond_numbers,
-    #     rel_step_sizes=rel_step_sizes,
-    #     sampler_specs=sampler_specs,
-    #     eval_steps=make_eval_steps(cond_numbers=cond_numbers),
-    #     target_eps=0.1,
-    #     target_eps_white=0.2,
-    #     use_rel_tolerance=False,
-    #     use_float32=use_float32,
-    #     seed=42,
-    # )
-    # df_dim_kappa.to_csv(
-    #     f"dimension_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_log_f32.csv",
-    #     index=False,
-    # )
+    df_dim_kappa = run_grid_search(
+        dims=dims,
+        cond_numbers=cond_numbers,
+        rel_step_sizes=rel_step_sizes,
+        sampler_specs=sampler_specs,
+        eval_steps=make_eval_steps(cond_numbers=cond_numbers),
+        target_eps=0.1,
+        target_eps_white=0.2,
+        use_rel_tolerance=False,
+        use_float32=use_float32,
+        seed=42,
+    )
+    df_dim_kappa.to_csv(
+        f"dimension_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_RMULMCAdv_f32.csv",
+        index=False,
+    )

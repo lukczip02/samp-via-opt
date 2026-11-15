@@ -21,11 +21,8 @@ from samp_via_opt.diagnostics import gaussian_wasserstein_distance
 grads_per_step = {
     "ULA": 1,
     "ULMC": 1,
-    "RMULA": 2,
     "RMULMC": 2,
     "RMULMCAdv": 3,
-    "RMULMCGamma": 2,
-    "TIPreL": 1,
 }
 
 

@@ -1,32 +1,31 @@
 """Post-processing of the dimension / condition-number scaling experiments.
 
-Compares ULA, ULMC and RMULMC (plus RMULMC with the fixed friction gamma = 2 of Shen & Lee)
+Compares ULA, ULMC and RMULMC (plus RMULMC with the fixed friction gamma = 2 of Shen & Lee (2019))
 on Gaussian targets. For every (sampler, dimension d, condition number kappa) the cost T is the
 number of gradient evaluations until the Wasserstein-2 error stays below a tolerance, minimised
 over step size h (and friction gamma, if the sampler has one).
 
 Convergence criterion:
-    The W2 error is normalised, in one of two ways (``--tolerance`` must match the run that
-    produced the csv, i.e. ``use_rel_tolerance`` of ``dimension_conditioning.py``):
+    The W2 error is normalised, in one of two ways (--tolerance must match the run that
+    produced the csv, i.e. use_rel_tolerance of dimension_conditioning.py):
 
-    * ``relative``: W2 <= eps * sqrt(d / m). The absolute tolerance grows like sqrt(d), which
-      cancels the d-dependence of the theoretical bounds (reference d-exponent 0). Use for
+    -) "relative": W2 <= eps * sqrt(d / m). The absolute tolerance grows like sqrt(d), which
+      cancels the d-dependence of the theoretical bounds (reference d-exponent 0). Used for
       the kappa sweep.
-    * ``absolute``: W2 <= eps * sqrt(1 / m). Reference d-exponents are p = 1, 1/2, 1/3 for
+    -) "absolute": W2 <= eps * sqrt(1 / m). Reference d-exponents are p = 1, 1/2, 1/3 for
       ULA, ULMC, RMULMC. Use for the dimension sweep (needs ~d^2 chains, so small d only).
 
-    ``--criterion white`` uses the whitened W2 instead (W2_white <= eps_white * sqrt(d) for the
+    -) --criterion white uses a whitened W2 instead (W2_white <= eps_white * sqrt(d) for the
     relative and W2_white <= eps_white for the absolute tolerance).
 
 Censoring:
     If no configuration converged within the budget of a cell, the cell is "censored": it is
     drawn as a hollow triangle at the budget and excluded from all fits.
 
-Outputs (written to ``--out``):
+Outputs (written to --out):
     fig1_cost_vs_kappa.png        Cost vs kappa and local slopes, one column per dimension.
-    fig2_speedup.png              Speed-up over ULA vs kappa, dashed = reference slope.
-    fig3_cost_vs_dimension.png    Cost(d) / cost(d_min) vs d (needs >= 2 dimensions).
-    fig4_step_size_and_gamma.png  Step size and friction of the optimal configuration.
+    fig2_cost_vs_dimension.png    Cost(d) / cost(d_min) vs d (needs >= 2 dimensions).
+    fig3_step_size_and_gamma.png  Diagnositc: Step size and friction of the optimal configuration.
     best_configs.csv              Optimal (h, gamma) and quality flags for every cell.
     exponents.csv                 All fitted exponents (kappa, speed-up, dimension).
     table_cost.csv                Cost per kappa x (sampler, dimension).
@@ -38,7 +37,7 @@ Example:
     python scaling_analysis.py dimension_scaling_results.csv --out analysis_dim \\
         --tolerance absolute
 
-Adding a sampler (e.g. RMULA) only requires one new entry in ``SAMPLERS``.
+Sampler can be added by creating a new entry in "SAMPLERS".
 """
 
 from __future__ import annotations
@@ -71,16 +70,13 @@ class SamplerConfig:
         kappa_exponent: Reference exponent a in cost ~ kappa^a (dashed lines).
         dim_exponent_abs: Exponent p in the theory bound cost ~ d^p / eps_abs^q for a fixed
             absolute tolerance eps_abs.
-        eps_exponent: Exponent q in the same bound. With the relative tolerance
-            eps_abs = eps * sqrt(d / m) the reference d-exponent becomes p - q / 2 (= 0 for
-            all samplers below).
         has_free_gamma: Whether the friction gamma is a tuned hyperparameter.
         step_in_gamma_units: Whether the step-size grid of the experiment is
-            ``gamma * rel_step_sizes`` (ULMC) instead of ``rel_step_sizes``. Only used to
+            gamma * rel_step_sizes (ULMC) instead of rel_step_sizes. Only used to
             detect optima at the edge of the grid.
         subscript: LaTeX subscript for axis labels. Defaults to the sampler name.
         base_sampler: If set, this entry is a variant that reuses the runs of another sampler.
-        only_gamma: Key of ``GAMMA_RULES`` the variant is restricted to.
+        only_gamma: Key of "GAMMA_RULES" the variant is restricted to.
     """
 
     label: str
@@ -88,7 +84,6 @@ class SamplerConfig:
     marker: str
     kappa_exponent: float
     dim_exponent_abs: float
-    eps_exponent: float
     has_free_gamma: bool
     step_in_gamma_units: bool = False
     subscript: str | None = None
@@ -100,33 +95,28 @@ class SamplerConfig:
 SAMPLERS: dict[str, SamplerConfig] = {
     "ULA": SamplerConfig(
         label="ULA", color="tab:blue", marker="o",
-        kappa_exponent=1.0, dim_exponent_abs=1.0, eps_exponent=2.0,
+        kappa_exponent=1.0, dim_exponent_abs=1.0,
         has_free_gamma=False,
     ),
     "ULMC": SamplerConfig(
         label="ULMC", color="tab:red", marker="s",
-        kappa_exponent=0.5, dim_exponent_abs=0.5, eps_exponent=1.0,
+        kappa_exponent=0.5, dim_exponent_abs=0.5,
         has_free_gamma=True, step_in_gamma_units=True,
     ),
     "RMULMC": SamplerConfig(
         label="RM-ULMC", color="tab:green", marker="^",
-        kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
+        kappa_exponent=0.5, dim_exponent_abs=1 / 3,
         has_free_gamma=True,
     ),
     "RMULMC_g2": SamplerConfig(
-        label=r"RM-ULMC ($\gamma=2$)", color="tab:orange", marker="D",
-        kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
+        label=r"RM-ULMC ($\gamma=2$, SL2019)", color="tab:orange", marker="D",
+        kappa_exponent=0.5, dim_exponent_abs=1 / 3,
         has_free_gamma=False, subscript=r"\mathrm{RM-ULMC},\gamma{=}2",
         base_sampler="RMULMC", only_gamma="2",
     ),
     "RMULMCAdv": SamplerConfig(
-        label="RM-ULMC_Adv", color="tab:purple", marker="v",
-        kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
-        has_free_gamma=True,
-    ),
-    "RMULMCGamma": SamplerConfig(
-        label="RM-ULMC-Gamma", color="tab:brown", marker="X",
-        kappa_exponent=0.5, dim_exponent_abs=1 / 3, eps_exponent=2 / 3,
+        label="RM-ULMC (A2025)", color="tab:purple", marker="v",
+        kappa_exponent=0.5, dim_exponent_abs=1 / 3,
         has_free_gamma=True,
     ),
 }  # fmt: skip
@@ -136,7 +126,7 @@ NEAR_OPTIMAL_FACTOR = 1.2  # "near optimal" = cost within 20 % of the best cost
 CELL_KEY = ["sampler", "dimension", "kappa"]
 ULA_STABILITY_LIMIT = 2.0  # 2 / L with L = 1 by construction of the targets
 
-# Friction rules of the experiment: key (as derived by ``gamma_rule``) -> axis label.
+# Friction rules of the experiment: key -> axis label.
 GAMMA_RULES = {
     "1/sqrt(k)": r"$1/\sqrt{\kappa}$",
     "2/sqrt(k)": r"$2/\sqrt{\kappa}$",
@@ -184,8 +174,8 @@ class Setup:
     """Analysis settings shared by all figures.
 
     Attributes:
-        criterion: ``"euclid"`` or ``"white"``.
-        tolerance: ``"relative"`` or ``"absolute"``.
+        criterion: "euclid" or "white".
+        tolerance: "relative" or "absolute".
         epsilon: Tolerance value eps of the criterion (read from the csv).
         kappa_min: Smallest kappa used for fits and reference lines.
     """
@@ -197,7 +187,7 @@ class Setup:
 
     @property
     def criterion_text(self) -> str:
-        """Mathtext of the convergence criterion, e.g. ``W_2 <= eps * sqrt(d/m)``."""
+        """Mathtext of the convergence criterion, e.g. "$W_2 <= eps * sqrt(d/m)$"."""
         cols = CRITERIA[self.criterion]
         scale = (
             cols.relative_scale if self.tolerance == "relative" else cols.absolute_scale
@@ -241,7 +231,7 @@ def set_plot_style(use_latex: bool) -> None:
 
 
 def present_samplers(table: pd.DataFrame) -> list[str]:
-    """Returns the samplers occurring in ``table``, in the order of ``SAMPLERS``."""
+    """Returns the samplers occurring in "table", in the order of "SAMPLERS"."""
     available = set(table["sampler"])
     return [name for name in SAMPLERS if name in available]
 
@@ -249,23 +239,6 @@ def present_samplers(table: pd.DataFrame) -> list[str]:
 def sampler_subscript(sampler: str) -> str:
     """Returns the LaTeX subscript of a sampler for axis labels like T_{...}."""
     return SAMPLERS[sampler].subscript or rf"\mathrm{{{sampler}}}"
-
-
-def reference_dim_exponent(sampler: str, tolerance: str) -> float:
-    """Returns the theoretical exponent b in cost ~ d^b for the given tolerance.
-
-    Args:
-        sampler: Key of ``SAMPLERS``.
-        tolerance: ``"relative"`` or ``"absolute"``.
-
-    Returns:
-        ``p`` for an absolute tolerance, ``p - q / 2`` for a relative one (see
-        ``SamplerConfig``).
-    """
-    config = SAMPLERS[sampler]
-    if tolerance == "absolute":
-        return config.dim_exponent_abs
-    return config.dim_exponent_abs - config.eps_exponent / 2
 
 
 def format_exponent(exponent: float) -> str:
@@ -277,7 +250,7 @@ def format_exponent(exponent: float) -> str:
 
 
 def format_table(table: pd.DataFrame) -> str:
-    """Formats a data frame for console output (without the ``kind`` and all-empty columns)."""
+    """Formats a data frame for console output (without the "kind" and all-empty columns)."""
     table = table.drop(columns="kind", errors="ignore").dropna(axis=1, how="all")
     return table.to_string(index=False, float_format=lambda value: f"{value:.2f}")
 
@@ -328,7 +301,7 @@ def gamma_rule(gamma: float, kappa: float) -> str:
         kappa: Condition number of the run.
 
     Returns:
-        Key of ``GAMMA_RULES``, ``"-"`` if the sampler has no gamma, or the formatted value
+        Key of "GAMMA_RULES", "-" if the sampler has no gamma, or the formatted value
         if no rule matches.
     """
     if pd.isna(gamma):
@@ -344,16 +317,16 @@ def gamma_rule(gamma: float, kappa: float) -> str:
 
 
 def add_sampler_variants(runs: pd.DataFrame) -> pd.DataFrame:
-    """Creates one block of rows per entry of ``SAMPLERS``.
+    """Creates one block of rows per entry of "SAMPLERS".
 
     A variant (e.g. RMULMC with gamma = 2) keeps only the runs of its base sampler with the
     fixed friction rule, so it is analysed independently of whether that rule is optimal.
 
     Args:
-        runs: Runs of the base samplers with a ``gamma_rule`` column.
+        runs: Runs of the base samplers with a "gamma_rule" column.
 
     Returns:
-        Runs relabelled by the keys of ``SAMPLERS``.
+        Runs relabelled by the keys of "SAMPLERS".
     """
     blocks = []
     for name, config in SAMPLERS.items():
@@ -369,13 +342,13 @@ def prepare_runs(raw: pd.DataFrame, criterion: str) -> pd.DataFrame:
 
     Args:
         raw: Content of the experiment csv.
-        criterion: ``"euclid"`` or ``"white"``.
+        criterion: "euclid" or "white".
 
     Returns:
-        One row per run with the columns ``cost`` (gradient evaluations until convergence,
-        inf if not converged), ``budget`` (right-censoring level in the same unit),
-        ``steps_converged``, ``final_error``, ``eps_used``, ``gamma_rule`` and
-        ``relative_step`` (step size in the units of the experiment grid).
+        One row per run with the columns "cost" (gradient evaluations until convergence,
+        inf if not converged), "budget" (right-censoring level in the same unit),
+        "steps_converged", "final_error", "eps_used", "gamma_rule" and
+        "relative_step" (step size in the units of the experiment grid).
     """
     columns = CRITERIA[criterion]
     base_samplers = {config.base_sampler or name for name, config in SAMPLERS.items()}
@@ -418,17 +391,17 @@ def select_best_configs(runs: pd.DataFrame, first_checkpoint: int) -> pd.DataFra
     """Selects the cheapest configuration of every (sampler, dimension, kappa) cell.
 
     The tuned samplers get more tries at the minimum of a noisy quantity than ULA (144 / 192
-    vs 48 runs per cell); ``n_near_optimal`` shows how flat the optimum is.
+    vs 48 runs per cell); n_near_optimal shows how flat the optimum is.
 
     Args:
-        runs: Output of ``prepare_runs``.
-        first_checkpoint: First evaluation step of the experiment (``make_eval_steps``).
+        runs: Output of prepare_runs().
+        first_checkpoint: First evaluation step of the experiment (make_eval_steps()).
             Convergence at this step is flagged as left-censored.
 
     Returns:
         One row per cell. Cells where nothing converged keep the run with the smallest final
-        error (``censored`` = True, for diagnostics only). Extra columns: ``n_near_optimal``,
-        ``step_at_edge`` and ``left_censored``.
+        error ("censored" = True, for diagnostics only). Extra columns: "n_near_optimal",
+        "step_at_edge" and "left_censored".
     """
     best = (
         runs.sort_values(["cost", "final_error"])
@@ -460,8 +433,8 @@ def run_sanity_checks(runs: pd.DataFrame, best: pd.DataFrame) -> pd.DataFrame:
     """Summarises per sampler how trustworthy the optima are.
 
     Args:
-        runs: Output of ``prepare_runs``.
-        best: Output of ``select_best_configs``.
+        runs: Output of prepare_runs().
+        best: Output of select_best_configs().
 
     Returns:
         Counts of censored / edge / left-censored / borderline cells, the median number of
@@ -496,7 +469,7 @@ def fit_power_law(x_values: np.ndarray, y_values: np.ndarray) -> tuple[float, fl
         y_values: Positive y-values.
 
     Returns:
-        ``(exponent, std_error)``. The standard error is the scatter around the line and NaN
+        (exponent, std_error). The standard error is the scatter around the line and NaN
         for fewer than three points; the exponent is NaN for fewer than two.
     """
     log_x, log_y = np.log(x_values), np.log(y_values)
@@ -529,9 +502,7 @@ def kappa_exponents(best: pd.DataFrame, kappa_min: float) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=FIT_COLUMNS)
 
 
-def dimension_exponents(
-    best: pd.DataFrame, kappa_min: float, tolerance: str
-) -> pd.DataFrame:
+def dimension_exponents(best: pd.DataFrame, kappa_min: float) -> pd.DataFrame:
     """Fits cost ~ d^beta per (sampler, kappa); needs >= 2 dimensions per fit."""
     rows = []
     candidates = best[~best["censored"] & (best["kappa"] >= kappa_min)]
@@ -543,7 +514,7 @@ def dimension_exponents(
         )
         rows.append(dict(kind="dimension", sampler=sampler, kappa=kappa, exponent=exponent,
                          std_error=std_error, num_points=len(group),
-                         reference=reference_dim_exponent(sampler, tolerance)))  # fmt: skip
+                         reference=SAMPLERS[sampler].dim_exponent_abs))  # fmt: skip
     return pd.DataFrame(rows, columns=FIT_COLUMNS)
 
 
@@ -577,10 +548,10 @@ def speedup_table(best: pd.DataFrame) -> pd.DataFrame:
     dropped.
 
     Args:
-        best: Output of ``select_best_configs``.
+        best: Output of select_best_configs().
 
     Returns:
-        Columns ``sampler``, ``dimension``, ``kappa``, ``speedup``, ``is_lower_bound``.
+        Columns "sampler", "dimension", "kappa", "speedup", "is_lower_bound".
     """
     columns = ["sampler", "dimension", "kappa", "speedup", "is_lower_bound"]
     if BASELINE not in set(best["sampler"]):
@@ -638,9 +609,9 @@ def plot_cost_vs_kappa(best: pd.DataFrame, fits: pd.DataFrame, slopes: pd.DataFr
     """Figure 1: cost vs kappa (top) and local slopes (bottom), one column per dimension.
 
     Args:
-        best: Output of ``select_best_configs``.
-        fits: Kappa exponents from ``kappa_exponents``.
-        slopes: Local slopes from ``local_kappa_slopes``.
+        best: Output of select_best_configs().
+        fits: Kappa exponents from kappa_exponents().
+        slopes: Local slopes from local_kappa_slopes().
         dimensions: Dimensions to show (one column each).
         setup: Analysis settings.
         path: Output file.
@@ -710,96 +681,15 @@ def plot_cost_vs_kappa(best: pd.DataFrame, fits: pd.DataFrame, slopes: pd.DataFr
     save_figure(figure, path, setup.title(headline))
 
 
-def plot_speedup(speedups: pd.DataFrame, setup: Setup, path: Path) -> None:
-    """Figure 2: speed-up over the baseline vs kappa, one panel per sampler.
-
-    Args:
-        speedups: Output of ``speedup_table``.
-        setup: Analysis settings.
-        path: Output file.
-    """
-    speedups = speedups[speedups["speedup"].notna()]
-    samplers = [name for name in SAMPLERS if name in set(speedups["sampler"])]
-    if not samplers:
-        return
-
-    max_columns = 2
-    num_rows = -(-len(samplers) // max_columns)  # ceil division
-    figure = plt.figure(figsize=(4.3 * max_columns, 3.0 * num_rows))
-    grid = figure.add_gridspec(num_rows, 2 * max_columns)
-    panel_axes = []
-    for index in range(len(samplers)):
-        row, column = divmod(index, max_columns)
-        panels_in_row = min(max_columns, len(samplers) - row * max_columns)
-        if panels_in_row == 1:  # lone panel in the last row: center it
-            columns = slice(1, 3)
-        else:
-            columns = slice(2 * column, 2 * column + 2)
-        panel_axes.append(
-            figure.add_subplot(
-                grid[row, columns], sharey=panel_axes[0] if panel_axes else None
-            )
-        )
-
-    for axis, sampler in zip(panel_axes, samplers):
-        reference = SAMPLERS[BASELINE].kappa_exponent - SAMPLERS[sampler].kappa_exponent
-        for color_index, (dimension, group) in enumerate(
-            speedups[speedups["sampler"] == sampler].groupby("dimension")
-        ):
-            group = group.sort_values("kappa")
-            color = f"C{color_index}"
-            exact, bounds = (
-                group[~group["is_lower_bound"]],
-                group[group["is_lower_bound"]],
-            )
-            axis.plot(
-                exact["kappa"],
-                exact["speedup"],
-                "o-",
-                color=color,
-                label=rf"$d={dimension}$",
-            )
-            axis.plot(bounds["kappa"], bounds["speedup"], "^", mfc="none", color=color)
-            fit_region = exact[exact["kappa"] >= setup.kappa_min]
-            if len(fit_region):
-                anchor_kappa, anchor_speedup = (
-                    fit_region.iloc[0]["kappa"],
-                    fit_region.iloc[0]["speedup"],
-                )
-                kappas = group.loc[
-                    group["kappa"] >= setup.kappa_min, "kappa"
-                ].to_numpy()
-                axis.plot(kappas, anchor_speedup * (kappas / anchor_kappa) ** reference, "--",
-                          color=color, alpha=0.45, lw=1)  # fmt: skip
-        panel_title = (f"{SAMPLERS[sampler].label} vs {BASELINE} "
-                       rf"(dashed: $\kappa^{{{format_exponent(reference)}}}$)")  # fmt: skip
-        axis.set(
-            xscale="log",
-            yscale="log",
-            xlabel=r"condition number $\kappa$",
-            title=panel_title,
-        )
-        axis.set_ylabel(
-            rf"speed-up $T_{{\mathrm{{{BASELINE}}}}}/T_{{{sampler_subscript(sampler)}}}$"
-        )
-        axis.legend(fontsize=8)
-
-    headline = (
-        r"Speed-up over " + BASELINE + r" based on cost $T$ (gradient evaluations)"
-        # + r" ($\triangle$ = lower bound, baseline not converged)"
-    )
-    save_figure(figure, path, setup.title(headline))
-
-
 def plot_cost_vs_dimension(best: pd.DataFrame, setup: Setup, path: Path) -> bool:
-    """Figure 3: cost(d) / cost(d_min) at fixed kappa, one panel per sampler.
+    """Figure 2: cost(d) / cost(d_min) at fixed kappa, one panel per sampler.
 
-    The dashed line is the theoretical reference (flat for the relative tolerance, d^p for the
-    absolute tolerance). The legend gives the fitted exponent beta (cost ~ d^beta) per kappa.
+    The dashed line is the theoretical reference d^p (always use absolute tolerance)
+    The legend gives the fitted exponent beta (cost ~ d^beta) per kappa.
     Panels are arranged with at most two per row; a lone panel in the last row is centered.
 
     Args:
-        best: Output of ``select_best_configs``.
+        best: Output of select_best_configs().
         setup: Analysis settings.
         path: Output file.
 
@@ -850,7 +740,7 @@ def plot_cost_vs_dimension(best: pd.DataFrame, setup: Setup, path: Path) -> bool
             plotted.append(relative_cost.to_numpy())
             axis.plot(group["dimension"], relative_cost, "o-",
                       label=rf"$\kappa={kappa:g}$, $\beta={exponent:.2f}$")  # fmt: skip
-        reference = reference_dim_exponent(sampler, setup.tolerance)
+        reference = SAMPLERS[sampler].dim_exponent_abs
         reference_curve = (dimension_values / dimension_values[0]) ** reference
         plotted.append(reference_curve)
         axis.plot(dimension_values, reference_curve, c="k", ls="--", lw=1,
@@ -869,27 +759,22 @@ def plot_cost_vs_dimension(best: pd.DataFrame, setup: Setup, path: Path) -> bool
     for axis, leftmost in zip(panel_axes, is_leftmost):
         if leftmost:
             axis.set_ylabel(r"$T(d)\,/\,T(d_{\min})$")
-    if setup.tolerance == "relative":
-        headline = (
-            r"Cost $T$ (gradient evaluations) vs dimension (best $h,\gamma$ per point)"
-        )
-    else:
-        headline = (
-            r"Cost $T$ (gradient evaluations) vs dimension (best $h,\gamma$ per point)"
-        )
+    headline = (
+        r"Cost $T$ (gradient evaluations) vs dimension (best $h,\gamma$ per point)"
+    )
     save_figure(figure, path, setup.title(headline))
     return True
 
 
 def plot_step_size_and_gamma(best: pd.DataFrame, setup: Setup, path: Path) -> None:
-    """Figure 4: absolute step size and winning friction rule of the optimal configurations.
+    """Figure 3: absolute step size and winning friction rule of the optimal configurations.
 
     Left: optimal step size h* (absolute, so samplers can be compared directly; ULMC's h*
     scales with its gamma). Right: which friction rule wins, for samplers with a free gamma.
     Crosses mark optima at the edge of the step-size grid, i.e. where the grid should be extended.
 
     Args:
-        best: Output of ``select_best_configs``.
+        best: Output of select_best_configs().
         setup: Analysis settings.
         path: Output file.
     """
@@ -1005,7 +890,7 @@ def main() -> None:
     kappa_fits = kappa_exponents(best, args.kappa_min)
     speedups = speedup_table(best)
     speedup_fits = speedup_exponents(speedups, args.kappa_min)
-    dimension_fits = dimension_exponents(best, args.kappa_min, args.tolerance)
+    dimension_fits = dimension_exponents(best, args.kappa_min)
     print(
         f"\n=== cost ~ kappa^alpha for kappa >= {args.kappa_min:g} ===\n{format_table(kappa_fits)}"
     )
@@ -1030,9 +915,15 @@ def main() -> None:
 
     plot_cost_vs_kappa(best, kappa_fits, local_kappa_slopes(best), sorted(fig1_dimensions), setup,
                        output_dir / "fig1_cost_vs_kappa.png")  # fmt: skip
-    plot_speedup(speedups, setup, output_dir / "fig2_speedup.png")
-    plot_cost_vs_dimension(best, setup, output_dir / "fig3_cost_vs_dimension.png")
-    plot_step_size_and_gamma(best, setup, output_dir / "fig4_step_size_and_gamma.png")
+    if args.tolerance == "absolute":
+        plot_cost_vs_dimension(best, setup, output_dir / "fig2_cost_vs_dimension.png")
+        plot_step_size_and_gamma(
+            best, setup, output_dir / "fig3_step_size_and_gamma.png"
+        )
+    else:
+        plot_step_size_and_gamma(
+            best, setup, output_dir / "fig2_step_size_and_gamma.png"
+        )
 
     best.to_csv(output_dir / "best_configs.csv", index=False)
     checks.to_csv(output_dir / "checks.csv")

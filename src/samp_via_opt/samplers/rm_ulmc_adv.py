@@ -1,10 +1,11 @@
 """
 Implementation of the Randomized Midpoint Underdamped Langevin Monte Carlo (RM-ULMC) sampler.
-The algorithm is the modified variant of Altschuler et al. (2025), Sec. 5.3.3 (Shen and Lee (2019)
-use one random midpoint, here two independent ones u_n ~ q_u and v_n ~ q_v are drawn per step).
+The algorithm is the modified variant of Altschuler et al. (2025), Sec. 5.3.3
+(Shen and Lee (2019) use one random midpoint, here two independent ones
+u_n ~ q_u and v_n ~ q_v are drawn per step).
 
-Dynamics (temperature beta, friction gamma, potential V = -log pi):
-    dX = P dt,    dP = (-gamma P + beta * grad log pi(X)) dt + sqrt(2 gamma beta) dB.
+Dynamics (temperature beta, friction gamma, potential V = -log p):
+    dX = P dt,    dP = (-gamma P + beta * grad log p(X)) dt + sqrt(2 gamma beta) dB.
 
 One step costs three gradient evaluations (at x, at the u-midpoint and at the v-midpoint).
 
