@@ -103,19 +103,19 @@ SAMPLERS: dict[str, SamplerConfig] = {
         kappa_exponent=0.5, dim_exponent_abs=0.5,
         has_free_gamma=True, step_in_gamma_units=True,
     ),
-    "RMULMC": SamplerConfig(
-        label="RM-ULMC", color="tab:green", marker="^",
-        kappa_exponent=0.5, dim_exponent_abs=1 / 3,
-        has_free_gamma=True,
-    ),
     "RMULMC_g2": SamplerConfig(
         label=r"RM-ULMC ($\gamma=2$, SL2019)", color="tab:orange", marker="D",
         kappa_exponent=0.5, dim_exponent_abs=1 / 3,
         has_free_gamma=False, subscript=r"\mathrm{RM-ULMC},\gamma{=}2",
         base_sampler="RMULMC", only_gamma="2",
     ),
+    "RMULMC": SamplerConfig(
+        label=r"RM-ULMC (tuned $\gamma$)", color="tab:green", marker="^",
+        kappa_exponent=0.5, dim_exponent_abs=1 / 3,
+        has_free_gamma=True,
+    ),
     "RMULMCAdv": SamplerConfig(
-        label="RM-ULMC (A2025)", color="tab:purple", marker="v",
+        label="RM-ULMC (A2026)", color="tab:purple", marker="v",
         kappa_exponent=0.5, dim_exponent_abs=1 / 3,
         has_free_gamma=True,
     ),
@@ -709,25 +709,24 @@ def plot_cost_vs_dimension(best: pd.DataFrame, setup: Setup, path: Path) -> bool
     dimension_values = np.array(dimensions, dtype=float)
     samplers = present_samplers(best)
 
-    max_columns = 2
+    max_columns = 3
     num_rows = -(-len(samplers) // max_columns)  # ceil division
-    figure = plt.figure(figsize=(4.3 * max_columns, 3.0 * num_rows))
+    figure = plt.figure(figsize=(2.9 * max_columns, 3.0 * num_rows))
     grid = figure.add_gridspec(num_rows, 2 * max_columns)
     panel_axes = []
     is_leftmost = []
     for index in range(len(samplers)):
         row, column = divmod(index, max_columns)
         panels_in_row = min(max_columns, len(samplers) - row * max_columns)
-        if panels_in_row == 1:  # lone panel in the last row: center it
-            columns = slice(1, 3)
-        else:
-            columns = slice(2 * column, 2 * column + 2)
+        # each panel spans 2 grid columns; every missing panel in this row shifts it right by 1
+        offset = max_columns - panels_in_row
+        columns = slice(offset + 2 * column, offset + 2 * column + 2)
         panel_axes.append(
             figure.add_subplot(
                 grid[row, columns], sharey=panel_axes[0] if panel_axes else None
             )
         )
-        is_leftmost.append(column == 0 or panels_in_row == 1)
+        is_leftmost.append(column == 0)
 
     plotted = []
     for axis, sampler in zip(panel_axes, samplers):

@@ -1,1 +1,2 @@
 from .gaussian import GaussianTarget as GaussianTarget
+from .logistic_regression import LogisticRegressionTarget as LogisticRegressionTarget
