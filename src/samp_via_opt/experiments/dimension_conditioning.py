@@ -134,7 +134,7 @@ def run_grid_search(
         target_eps: Convergence threshold for the target.
         target_eps_white: Convergence threshold for the target in whitened coordinates.
         num_steps: Number of steps to run for each chain.
-        init_sigma: Initial standard deviation for the starting point.
+        init_sigma: Start x0 is `init_sigma` std devs out along the slowest direction.
         use_rel_tolerance: Normalize convergence criterion by dimension.
                            relative tolerance: W2 <= sqrt(d/m) * eps
                            absolute tolerance: W2 <= sqrt(1/m) * eps
@@ -288,28 +288,28 @@ if __name__ == "__main__":
         ),
     }
 
-    # ## --- Experiment 1: condition number scaling ---
+    ## --- Experiment 1: condition number scaling ---
 
-    # cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
-    # # independent of dimension by using relative convergence tolerance
-    # dims = [2, 16, 64]
+    cond_numbers = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10_000.0]
+    # independent of dimension by using relative convergence tolerance
+    dims = [2, 16, 64]
 
-    # df_dim_kappa = run_grid_search(
-    #     dims=dims,
-    #     cond_numbers=cond_numbers,
-    #     rel_step_sizes=rel_step_sizes,
-    #     sampler_specs=sampler_specs,
-    #     eval_steps=make_eval_steps(cond_numbers=cond_numbers),
-    #     target_eps=0.1,
-    #     target_eps_white=0.2,
-    #     use_rel_tolerance=True,
-    #     use_float32=use_float32,
-    #     seed=42,
-    # )
-    # df_dim_kappa.to_csv(
-    #     f"conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_RMULMCAdv_f32.csv",
-    #     index=False,
-    # )
+    df_dim_kappa = run_grid_search(
+        dims=dims,
+        cond_numbers=cond_numbers,
+        rel_step_sizes=rel_step_sizes,
+        sampler_specs=sampler_specs,
+        eval_steps=make_eval_steps(cond_numbers=cond_numbers),
+        target_eps=0.1,
+        target_eps_white=0.2,
+        use_rel_tolerance=True,
+        use_float32=use_float32,
+        seed=42,
+    )
+    df_dim_kappa.to_csv(
+        f"conditioning_scaling_results_d{dims[0]}-{dims[-1]}_e01_ULA_ULMC_RMULMC_RMULMCAdv_f32.csv",
+        index=False,
+    )
 
     ## --- Experiment 2: dimension scaling ---
 

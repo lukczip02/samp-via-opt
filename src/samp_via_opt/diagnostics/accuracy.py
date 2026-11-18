@@ -1,4 +1,3 @@
-from functools import partial
 import jax
 import jax.numpy as jnp
 
@@ -50,45 +49,6 @@ def wasserstein_1d(u: jax.Array, v: jax.Array) -> jax.Array:
         u_quantiles = jnp.quantile(u_sorted, grid)
         v_quantiles = jnp.quantile(v_sorted, grid)
         return jnp.mean(jnp.abs(u_quantiles - v_quantiles))
-
-
-@partial(jax.jit, static_argnames=("num_projections",))
-def sliced_wasserstein_distance(
-    x: jax.Array,
-    y: jax.Array,
-    key: jax.Array,
-    num_projections: int = 64,
-) -> jax.Array:
-    """
-    Computes Sliced 2-Wasserstein distance (SW_2) between d-dimensional sample sets.
-
-    Args:
-        x (N, d): Sample matrix.
-        y (M, d): Sample or target reference matrix.
-        key (L, d): PRNGKey for sampling random projection directions on S^{d-1}.
-        num_projections: Number of random 1D projections (L).
-
-    Returns:
-        Scalar SW_2 distance.
-    """
-    d = x.shape[1]
-
-    # sample random directions uniformly on the unit sphere S^{d-1}
-    raw_dirs = jax.random.normal(key, shape=(num_projections, d))
-    projections = raw_dirs / jnp.linalg.norm(raw_dirs, axis=1, keepdims=True)  # (L, d)
-
-    # pProject d-dimensional samples onto 1D lines: (N, d) x (d, L) -> (N, L)
-    x_proj = x @ projections.T  # (N, L)
-    y_proj = y @ projections.T  # (M, L)
-
-    # vectorize 1D W_2 calculation across all L projection slices
-    def compute_slice_w2_sq(proj_x, proj_y):
-        return wasserstein_1d(proj_x, proj_y) ** 2
-
-    squared_w2_slices = jax.vmap(compute_slice_w2_sq, in_axes=(1, 1))(x_proj, y_proj)
-
-    # integrate across sphere via mean over projections
-    return jnp.sqrt(jnp.mean(squared_w2_slices))
 
 
 @jax.jit

@@ -77,9 +77,9 @@ def _segment_noise(
         G, B, each of shape (d,).
     """
     x = 0.5 * gamma * T
-    l11 = jnp.sqrt(-jnp.expm1(-2.0 * gamma * T) / (2.0 * gamma))
-    l21 = jnp.sqrt(2.0 / gamma * jnp.tanh(x))
-    l22 = jnp.sqrt(2.0 / gamma * _t_minus_tanh_t(x))
+    l11 = jnp.sqrt(jnp.maximum(-jnp.expm1(-2.0 * gamma * T) / (2.0 * gamma), 0.0))
+    l21 = jnp.sqrt(jnp.maximum(2.0 / gamma * jnp.tanh(x), 0.0))
+    l22 = jnp.sqrt(jnp.maximum(2.0 / gamma * _t_minus_tanh_t(x), 0.0))
     return l11 * z[0], l21 * z[0] + l22 * z[1]
 
 

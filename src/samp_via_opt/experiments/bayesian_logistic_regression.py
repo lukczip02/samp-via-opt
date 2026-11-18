@@ -8,9 +8,8 @@ Differences to the main experiments (dimension_conditioning.py):
 - Single problem, no sweep over (d, kappa). Same samplers, same step-size / friction grids, same metrics.
 - The posterior is not Gaussian and has no closed-form moments. Reference mean / covariance are estimated
   once with a Laplace-preconditioned MALA ensemble. The ensemble evaluator then compares the first two
-  moments of the sampler ensemble to these reference moments (Frechet distance, a lower bound on W2 which
+  moments of the sampler ensemble to these reference moments (Gaussian W2 distance, lower bound on actual W2 which
   is accurate for near-Gaussian posteriors; skewness / kurtosis of the reference are printed as a check).
-- The whitened metric (error in units of posterior standard deviations) is the primary criterion.
 """
 
 import math
@@ -18,6 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
+import blackjax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -93,14 +93,17 @@ class ReferencePosterior(NamedTuple):
     cov: jax.Array  # (d, d)
     x_map: jax.Array  # (d,) posterior mode
     hess_map: jax.Array  # (d, d) Hessian of the potential at the mode
-    step_size: float  # tuned MALA step size (in Laplace-whitened coordinates)
-    accept_rate: float
+    step_size: float  # MALA step size
+    accept_rate: float  # MALA acceptance rate
     skewness: jax.Array  # (d,) of the standardised marginals
     excess_kurtosis: jax.Array  # (d,)
 
 
 def find_map(target: LogisticRegressionTarget, num_iter: int = 50):
-    """Newton iterations for the posterior mode (strongly convex, so this is safe from x = 0)."""
+    """
+    Find x_map = argmin Ψ(x) and the Hessian there. Uses Newton's method with exact Hessian.
+    Run 'num_iter' Newton iterations from x=0.
+    """
 
     def newton(x, _):
         g = -target.grad_log_prob(x)
@@ -111,77 +114,58 @@ def find_map(target: LogisticRegressionTarget, num_iter: int = 50):
 
 
 @eqx.filter_jit
-def _run_mala(
-    target, key, x_map, chol, num_chains, burn_in, num_samples, thin, target_acc
-):
+def _run_mala(target, key, x_map, chol, num_chains, burn_in, num_samples, step_size):
     """
-    Ensemble MALA in Laplace-whitened coordinates z, x = x_map + chol @ z (chol chol^T = H_map^{-1}).
-    Step size is adapted (Robbins-Monro on the mean acceptance probability) during burn-in and then frozen.
+    Ensemble MALA (using blackJAX) in Laplace-whitened coordinates z, x = x_map + chol @ z (chol chol^T = H_map^{-1}).
+        Laplace approximation:
+            at the mode ∇Ψ = 0, so by 2nd-order Taylor expansion Ψ(x) ≈ Ψ(x_map) + 1/2 (x-x_map)^T H (x-x_map).
+            -> π ≈ N(x_map, H^{-1}) (for large n (Bernstein-von Mises), exact for Gaussian posterior)
+        if x ~ N(x_map, H^{-1}) then z ~ N(0, I) (isotropic in whitened coordinates)
+        -> fast convergence of MALA in z
+
+    The step size is fixed (no adaptation). The Metropolis correction keeps π invariant for any step size.
+    Chains start from the Laplace approximation, run `burn_in` steps, and then `num_samples` steps in which
+    first and second moments are accumulated over all chains and all steps.
     """
-    d = target.dim
+    dim = target.dim
 
-    def logp_grad(z):
-        x = x_map + chol @ z
-        return target.log_prob(x), chol.T @ target.grad_log_prob(x)
+    def logdensity(z):
+        return target.log_prob(x_map + chol @ z)
 
-    v_logp_grad = jax.vmap(logp_grad)
+    mala = blackjax.mala(logdensity, step_size)
+    batched_init = jax.vmap(mala.init)
+    batched_step = jax.vmap(mala.step)
 
-    def step(z, lp, g, h, key):
-        k_n, k_u = jax.random.split(key)
-        xi = jax.random.normal(k_n, z.shape, z.dtype)
-        z_new = z + 0.5 * h * g + jnp.sqrt(h) * xi
-        lp_new, g_new = v_logp_grad(z_new)
-        log_q_fwd = -0.5 * jnp.sum(xi**2, -1)
-        log_q_bwd = -0.5 / h * jnp.sum((z - z_new - 0.5 * h * g_new) ** 2, -1)
-        log_alpha = lp_new - lp + log_q_bwd - log_q_fwd
-        log_alpha = jnp.where(jnp.isfinite(log_alpha), log_alpha, -jnp.inf)
-        accept = jnp.log(jax.random.uniform(k_u, lp.shape)) < log_alpha
-        z = jnp.where(accept[:, None], z_new, z)
-        lp = jnp.where(accept, lp_new, lp)
-        g = jnp.where(accept[:, None], g_new, g)
-        return z, lp, g, jnp.mean(jnp.exp(jnp.minimum(log_alpha, 0.0)))
+    def advance(states, key):
+        """One MALA step for every chain; also returns the mean acceptance probability."""
+        states, info = batched_step(jax.random.split(key, num_chains), states)
+        return states, jnp.mean(info.acceptance_rate)
 
-    key_init, key_burn, key_samp = jax.random.split(key, 3)
-    z = jax.random.normal(
-        key_init, (num_chains, d)
-    )  # start from the Laplace approximation
-    lp, g = v_logp_grad(z)
+    key_init, key_burn_in, key_sampling = jax.random.split(key, 3)
+    z0 = jax.random.normal(
+        key_init, (num_chains, dim)
+    )  # exact draws from the Laplace approximation
+    states = batched_init(z0)
 
-    # burn-in with step-size adaptation
-    def burn(carry, t_key):
-        z, lp, g, log_h = carry
-        t, k = t_key
-        z, lp, g, acc = step(z, lp, g, jnp.exp(log_h), k)
-        log_h = log_h + 2.0 / (1.0 + t) ** 0.6 * (acc - target_acc)
-        return (z, lp, g, log_h), None
+    # burn-in
+    states, _ = jax.lax.scan(advance, states, jax.random.split(key_burn_in, burn_in))
 
-    (z, lp, g, log_h), _ = jax.lax.scan(
-        burn,
-        (z, lp, g, jnp.zeros(())),
-        (jnp.arange(burn_in, dtype=z.dtype), jax.random.split(key_burn, burn_in)),
+    # sampling: accumulate sum_z and sum_zzT over all chains and steps
+    def sampling_step(carry, key):
+        states, sum_z, sum_zzT = carry
+        states, accept_prob = advance(states, key)
+        z = states.position
+        return (states, sum_z + z.sum(axis=0), sum_zzT + z.T @ z), accept_prob
+
+    init = (states, jnp.zeros(dim, z0.dtype), jnp.zeros((dim, dim), z0.dtype))
+    (states, sum_z, sum_zzT), accept_probs = jax.lax.scan(
+        sampling_step, init, jax.random.split(key_sampling, num_samples)
     )
-    h = jnp.exp(log_h)
 
-    # sampling with frozen step size: accumulate first and second moments over chains and (thinned) time
-    def record(carry, k):
-        def inner(i, c):
-            z, lp, g, acc = c
-            z, lp, g, a = step(z, lp, g, h, jax.random.fold_in(k, i))
-            return z, lp, g, acc + a
-
-        z, lp, g, s1, s2, acc_sum = carry
-        z, lp, g, acc = jax.lax.fori_loop(0, thin, inner, (z, lp, g, jnp.zeros(())))
-        return (z, lp, g, s1 + z.sum(0), s2 + z.T @ z, acc_sum + acc / thin), None
-
-    n_rec = num_samples // thin
-    init = (z, lp, g, jnp.zeros(d), jnp.zeros((d, d)), jnp.zeros(()))
-    (z, _, _, s1, s2, acc_sum), _ = jax.lax.scan(
-        record, init, jax.random.split(key_samp, n_rec)
-    )
-    n = n_rec * num_chains
-    mean_z = s1 / n
-    cov_z = s2 / n - jnp.outer(mean_z, mean_z)
-    return mean_z, cov_z, z, h, acc_sum / n_rec
+    n = num_samples * num_chains
+    mean_z = sum_z / n
+    cov_z = sum_zzT / n - jnp.outer(mean_z, mean_z)  # E[zzᵀ] - μμᵀ
+    return mean_z, cov_z, states.position, jnp.mean(accept_probs)
 
 
 def reference_posterior(
@@ -190,32 +174,35 @@ def reference_posterior(
     num_chains: int = 2_000,
     burn_in: int = 1_000,
     num_samples: int = 2_000,
-    thin: int = 4,
-    target_acc: float = 0.55,
+    step_size: float | None = None,
 ) -> ReferencePosterior:
     """
-    Estimate posterior mean and covariance. Plays the role of the paper's long MALA run (5e5 steps x 1e4 chains),
-    but is much cheaper thanks to Laplace preconditioning: in the whitened coordinates the posterior is almost
-    isotropic and MALA mixes within a few steps.
+    Estimate posterior mean and covariance. Plays the role of a long MALA run,
+    but is very cheap because of Laplace preconditioning (see _run_mala()).
 
     Args:
         target: Logistic regression posterior.
         key: PRNGKey.
         num_chains: Number of parallel MALA chains.
-        burn_in: Burn-in steps (also used to tune the step size to `target_acc`).
-        num_samples: Sampling steps per chain after burn-in.
-        thin: Moments are accumulated every `thin` steps.
-        target_acc: Target acceptance rate (0.574 is the asymptotic optimum, paper uses 0.5).
+        burn_in: Burn-in steps.
+        num_samples: Sampling steps per chain after burn-in (moments are accumulated after every step).
+        step_size: Fixed MALA step size, proposal z' = z + step_size * ∇log π(z) + sqrt(2 * step_size) * noise.
+            Default: Roberts & Rosenthal (1998) optimal scaling for a standard normal target (acceptance ~ 0.57),
+            sig^2 = 1.65^2 * d^(-1/3) with proposal variance sig^2 = 2*step_size, i.e. step_size = sig^2 / 2.
 
     Returns:
         Reference moments and diagnostics.
     """
+    if step_size is None:
+        step_size = 0.5 * 1.65**2 * target.dim ** (-1.0 / 3.0)
+
     x_map, H = find_map(target)
     chol = jnp.linalg.cholesky(jnp.linalg.inv(H))
-    mean_z, cov_z, z_final, h, acc = _run_mala(
-        target, key, x_map, chol, num_chains, burn_in, num_samples, thin, target_acc
+    mean_z, cov_z, z_final, acc = _run_mala(
+        target, key, x_map, chol, num_chains, burn_in, num_samples, step_size
     )
 
+    # transform back to original coordinates
     mean = x_map + chol @ mean_z
     cov = chol @ cov_z @ chol.T
     cov = 0.5 * (cov + cov.T)
@@ -227,7 +214,7 @@ def reference_posterior(
         cov=cov,
         x_map=x_map,
         hess_map=H,
-        step_size=float(h),
+        step_size=float(step_size),
         accept_rate=float(acc),
         skewness=jnp.mean(u**3, axis=0),
         excess_kurtosis=jnp.mean(u**4, axis=0) - 3.0,
@@ -247,7 +234,7 @@ def run_logreg_experiment(
     eval_steps: np.ndarray,
     num_chains: int,
     target_eps: float = 0.1,
-    target_eps_white: float = 0.2,
+    target_eps_white: float = 0.1,
     init_sigma: float = 3.0,
     use_float32: bool = True,
     seed: int = 0,
@@ -260,7 +247,7 @@ def run_logreg_experiment(
     Args:
         target: Posterior with reference mean / cov.
         sampler_specs: Sampler name -> SamplerSpec (same objects as in the main experiments).
-        kappa_eff: Effective condition number L / lambda_min(Hessian at the mode). Used for the friction grids.
+        kappa_eff: Effective condition number L / lambda_min(Hessian at the mode). Used for the friction parameter choice.
         rel_step_sizes: Shared relative step-size window, see SamplerSpec.step_unit.
         eval_steps: Step numbers at which to evaluate the metrics.
         num_chains: Number of parallel chains of the evaluated samplers.
@@ -271,7 +258,7 @@ def run_logreg_experiment(
         seed: Random seed.
 
     Returns:
-        DataFrame in the format of convergence_table, plus gamma, kappa_eff, num_chains.
+        DataFrame in the format of convergence_table(), plus gamma, kappa_eff, num_chains.
     """
     dim = target.dim
     key_run, key_floor, key_floor_w = jax.random.split(jax.random.PRNGKey(seed), 3)
@@ -321,20 +308,21 @@ def run_logreg_experiment(
     return pd.concat(tables, ignore_index=True)
 
 
-def summarize(df: pd.DataFrame) -> pd.DataFrame:
-    """Best step size per (sampler, gamma) w.r.t. gradient evaluations to the whitened criterion."""
+def summarize(df: pd.DataFrame, criterion: str) -> pd.DataFrame:
+    """Best step size per (sampler, gamma) w.r.t. gradient evaluations to the specified criterion."""
     rows = []
     for (name, gamma), g in df.groupby(["sampler", "gamma"], dropna=False, sort=False):
-        r = g.loc[g["grad_evals_to_conv_white"].idxmin()]
+        r = g.loc[g[criterion].idxmin()]
         rows.append(
             {
                 "sampler": name,
                 "gamma": gamma,
-                "best_step": r["step_size"],
+                "best_step_size": r["step_size"],
                 "grad_evals_white": r["grad_evals_to_conv_white"],
                 "grad_evals_norm": r["grad_evals_to_conv"],
                 "final_mean_err_white": r["final_mean_err_white"],
                 "final_cov_err_white": r["final_cov_err_white"],
+                "sec_per_step": r["sec_per_step"],
                 "at_grid_edge": bool(
                     r["step_size"] in (g["step_size"].min(), g["step_size"].max())
                 ),
@@ -382,12 +370,12 @@ if __name__ == "__main__":
 
     use_float32 = True
     scaling = "minmax"  # "minmax" | "standard" | "none", see load_heart_disease
-    num_chains = 10_000  # as in the paper; whitened floor ~ 0.08 < 0.5 * eps_white
-    rel_step_sizes = jnp.logspace(
-        jnp.log10(0.1), jnp.log10(4.0), 24
-    )  # even number needed by the evaluator
+    num_chains = 30_000
+    target_eps = 0.1  # convergence threshold in original coordinates
+    target_eps_white = 0.1  # convergence threshold in whitened coordinates
+    rel_step_sizes = jnp.logspace(jnp.log10(0.3), jnp.log10(8.0), 32)
 
-    # --- problem and reference posterior ---
+    # problem and reference posterior
     X, y = load_heart_disease(scaling=scaling)
     d = X.shape[1]
     prior_var = jnp.linspace(0.1, 10.0, d)  # linearly interpolated prior variances
@@ -401,13 +389,15 @@ if __name__ == "__main__":
     kappa_eff = target.L / float(jnp.linalg.eigvalsh(ref.hess_map)[0])
     print(f"N = {X.shape[0]}, d = {d}, scaling = {scaling}")
     print(f"kappa_global = {kappa_global:.0f}, kappa_eff = {kappa_eff:.0f}")
-    print(f"reference MALA: step {ref.step_size:.2f}, acceptance {ref.accept_rate:.2f}")
     print(
-        f"reference |skew| max = {float(jnp.abs(ref.skewness).max()):.2f}, "
-        f"|excess kurtosis| max = {float(jnp.abs(ref.excess_kurtosis).max()):.2f} (0 for a Gaussian)"
+        f"reference MALA (blackJAX): step_size = {ref.step_size:.2f}, acceptance = {ref.accept_rate:.2f}"
+    )
+    print(
+        f"reference |skew|_max = {float(jnp.abs(ref.skewness).max()):.2f}, "
+        f"|excess kurtosis|_max = {float(jnp.abs(ref.excess_kurtosis).max()):.2f}"
     )
 
-    # --- samplers ---
+    # samplers
     sampler_dtype = jnp.float32 if use_float32 else jnp.float64
     df = run_logreg_experiment(
         target,
@@ -416,10 +406,30 @@ if __name__ == "__main__":
         rel_step_sizes=rel_step_sizes,
         eval_steps=make_eval_steps(cond_numbers=[kappa_eff])[0],
         num_chains=num_chains,
+        target_eps=target_eps,
+        target_eps_white=target_eps_white,
         use_float32=use_float32,
         seed=42,
     )
-    df.to_csv(f"logreg_heart_results_{scaling}_f32.csv", index=False)
+    df.to_csv(
+        f"logreg_heart_results_{scaling}_e{str(target_eps).replace('.', '')}_ew{str(target_eps_white).replace('.', '')}_f32.csv",
+        index=False,
+    )
 
-    print("\nBest step size per configuration (whitened criterion, eps_white = 0.2):")
-    print(summarize(df).to_string(index=False, float_format=lambda v: f"{v:.3g}"))
+    print(
+        f"\nBest step size per configuration (original criterion, eps = {target_eps}):"
+    )
+    print(
+        summarize(df, criterion="grad_evals_to_conv").to_string(
+            index=False, float_format=lambda v: f"{v:.3g}"
+        )
+    )
+
+    print(
+        f"\nBest step size per configuration (whitened criterion, eps_white = {target_eps_white}):"
+    )
+    print(
+        summarize(df, criterion="grad_evals_to_conv_white").to_string(
+            index=False, float_format=lambda v: f"{v:.3g}"
+        )
+    )

@@ -22,8 +22,7 @@ class LogisticRegressionTarget(BaseTarget):
 
     Coordinates are rescaled (w = sqrt(L) * beta) so that the global smoothness bound is L = 1,
     exactly as for the Gaussian targets of the main experiments. Step-size and friction grids are
-    therefore directly comparable. Whitened error metrics are invariant to this rescaling, and so
-    is the tolerance-normalised metric W2 / sqrt(1/m).
+    therefore directly comparable. Error metrics are invariant to this rescaling (W2 scales by 1/s and √(1/m) scales by 1/s).
 
     Attributes:
         X (N, d): Design matrix, already multiplied by `scale`.
@@ -56,16 +55,19 @@ class LogisticRegressionTarget(BaseTarget):
         prior_prec = 1.0 / jnp.asarray(prior_var)
 
         # sigmoid'(u) <= 1/4  =>  Hessian <= X^T X / 4 + Sigma^{-1}
-        # (a factor 4 tighter than the bound with sigmoid' <= 1)
         def smoothness(Xm, prec):
             return float(jnp.linalg.eigvalsh(Xm.T @ Xm)[-1] / 4.0 + jnp.max(prec))
 
+        # rescale such that L=1, since L of raw data in general not 1
+        # s = 1/\sqrt(L_0) where L_0 is the smoothness of the original target
         s = 1.0 / math.sqrt(smoothness(X, prior_prec)) if normalize else 1.0
         self.scale = s
         self.X = s * X
         self.y = jnp.asarray(y, dtype=self.X.dtype)
-        self.prior_prec = s**2 * prior_prec
-        self.L = smoothness(self.X, self.prior_prec)
+        self.prior_prec = s**2 * prior_prec  # 1/2 β^T Σ^{-1} β = 1/2 s^2 w^T Σ^{-1} w
+        self.L = smoothness(
+            self.X, self.prior_prec
+        )  # s^2 λ_max(XᵀX)/4 + s^2 prec_max = s^2 L_0 = 1
         self.m = float(jnp.min(self.prior_prec))
 
         d = X.shape[1]

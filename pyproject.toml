@@ -11,6 +11,7 @@ dependencies = [
     "jax[cuda12]; sys_platform == 'linux'",
     "jax; sys_platform != 'linux'",
     "equinox",
+    "blackjax",
     "matplotlib",
     "pandas",
     "numpy",
