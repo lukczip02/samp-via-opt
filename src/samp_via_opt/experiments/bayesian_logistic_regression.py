@@ -113,12 +113,15 @@ def reference_posterior(
         num_chains: Number of parallel MALA chains. Larger than the evaluated samplers
             (num_chains in run_logreg_experiment), so that the reference error is minimal.
         num_steps: MALA steps per chain. Large value to ensure convergence of the slowest direction (lambda_max(cov)).
-        step_size: Fixed MALA step size, tuned such that acceptance ~ 0.57.
+        step_size: Fixed MALA step size. If None, set to 2.0 / L (L = target.L after rescaling).
 
     Returns:
         Reference moments and diagnostics.
     """
     d = target.dim
+
+    if step_size is None:
+        step_size = 2.0 / target.L
 
     mala = blackjax.mala(target.log_prob, step_size)
     batched_step = jax.vmap(mala.step)
@@ -314,7 +317,7 @@ if __name__ == "__main__":
     prior_var = jnp.linspace(0.1, 10.0, d)  # linearly interpolated prior variances
     target = LogisticRegressionTarget(X, y, prior_var)
 
-    ref = reference_posterior(target, jax.random.PRNGKey(0), step_size=4.0 / target.L)
+    ref = reference_posterior(target, jax.random.PRNGKey(0), step_size=2.0 / target.L)
     target = target.with_moments(ref.mean, ref.cov)
 
     # kappa_global: worst case over the whole space (theory); kappa_eff: curvature where the mass is
