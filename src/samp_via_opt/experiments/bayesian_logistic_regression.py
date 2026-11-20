@@ -98,7 +98,7 @@ def reference_posterior(
     target: LogisticRegressionTarget,
     key: jax.Array,
     num_chains: int = 50_000,
-    num_steps: int = 20_000,
+    num_steps: int = 30_000,
     step_size: float | None = None,
 ) -> ReferencePosterior:
     """
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     prior_var = jnp.linspace(0.1, 10.0, d)  # linearly interpolated prior variances
     target = LogisticRegressionTarget(X, y, prior_var)
 
-    ref = reference_posterior(target, jax.random.PRNGKey(0), step_size=2.0 / target.L)
+    ref = reference_posterior(target, jax.random.PRNGKey(0), step_size=4.0 / target.L)
     target = target.with_moments(ref.mean, ref.cov)
 
     # kappa_global: worst case over the whole space (theory); kappa_eff: curvature where the mass is
