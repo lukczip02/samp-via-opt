@@ -98,7 +98,7 @@ def reference_posterior(
     target: LogisticRegressionTarget,
     key: jax.Array,
     num_chains: int = 50_000,
-    num_steps: int = 30_000,
+    num_steps: int = 50_000,
     step_size: float | None = None,
 ) -> ReferencePosterior:
     """
@@ -169,7 +169,7 @@ def run_logreg_experiment(
     eval_steps: np.ndarray,
     num_chains: int,
     target_eps: float = 0.1,
-    target_eps_white: float = 0.1,
+    target_eps_white: float = 0.2,
     init_sigma: float = 3.0,
     use_float32: bool = True,
     seed: int = 0,
@@ -306,10 +306,10 @@ if __name__ == "__main__":
 
     use_float32 = True
     scaling = "minmax"
-    num_chains = 30_000
+    num_chains = 10_000
     target_eps = 0.1  # convergence threshold in original coordinates
-    target_eps_white = 0.1  # convergence threshold in whitened coordinates
-    rel_step_sizes = jnp.logspace(jnp.log10(0.3), jnp.log10(8.0), 32)
+    target_eps_white = 0.2  # convergence threshold in whitened coordinates
+    rel_step_sizes = jnp.logspace(jnp.log10(0.1), jnp.log10(8.0), 48)
 
     # problem and reference posterior
     X, y = load_heart_disease(scaling=scaling)
@@ -317,6 +317,7 @@ if __name__ == "__main__":
     prior_var = jnp.linspace(0.1, 10.0, d)  # linearly interpolated prior variances
     target = LogisticRegressionTarget(X, y, prior_var)
 
+    # step size yields high acceptance ~ 0.8, further increasing step size is unstable (high skewness and kurtosis)
     ref = reference_posterior(target, jax.random.PRNGKey(0), step_size=2.0 / target.L)
     target = target.with_moments(ref.mean, ref.cov)
 
