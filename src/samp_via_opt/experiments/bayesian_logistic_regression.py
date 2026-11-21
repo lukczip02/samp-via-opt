@@ -98,7 +98,7 @@ def reference_posterior(
     target: LogisticRegressionTarget,
     key: jax.Array,
     num_chains: int = 50_000,
-    num_steps: int = 50_000,
+    num_steps: int = 20_000,
     step_size: float | None = None,
 ) -> ReferencePosterior:
     """
@@ -111,7 +111,7 @@ def reference_posterior(
         target: Logistic regression posterior.
         key: PRNGKey.
         num_chains: Number of parallel MALA chains. Larger than the evaluated samplers
-            (num_chains in run_logreg_experiment), so that the reference error is minimal.
+            (num_chains in run_logreg_experiment), so that the reference MC error is minimal.
         num_steps: MALA steps per chain. Large value to ensure convergence of the slowest direction (lambda_max(cov)).
         step_size: Fixed MALA step size. If None, set to 2.0 / L (L = target.L after rescaling).
 
